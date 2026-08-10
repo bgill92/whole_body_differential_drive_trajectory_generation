@@ -1,0 +1,237 @@
+use rerun::external::re_importer::UrdfTree;
+use rerun::{CoordinateFrame, TransformAxes3D};
+
+use rerun::external::{anyhow, re_log, urdf_rs};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    re_log::setup_logging();
+
+    let rec = rerun::RecordingStreamBuilder::new("urdf_view").spawn()?;
+
+    let urdf_path = "assets/rox_diff_ur5e.urdf";
+
+    rec.log_file_from_path(urdf_path, None, true)?;
+
+    let urdf = UrdfTree::from_file_path(urdf_path, None)?;
+
+    println!("Joints:");
+    for joint in urdf.joints() {
+        println!("name: {}, type: {:?}", joint.name, joint.joint_type);
+        if joint.name == "ur5eshoulder_pan_joint" {
+            let joint_transform = urdf.compute_joint_transform(joint, 3.14159, true)?;
+            rec.log("/transforms", &joint_transform)?;
+        }
+    }
+
+    let mut links: Vec<&str> = vec![urdf.root().name.as_str()];
+    links.extend(urdf.joints().map(|j| j.child.link.as_str()));
+
+    // println!("Links:");
+    // for link in links {
+    //     println!("{}", link);
+    // }
+
+    for link in links {
+        let path = format!("axes/{}", link);
+        rec.log_static(path.clone(), &rerun::CoordinateFrame::new(link))?;
+        rec.log_static(path, &rerun::TransformAxes3D::new(0.1))?;
+    }
+
+    // println!("{}", urdf.root().name);
+
+    // rec.log("world", );
+
+    for step in 0..10000 {
+        rec.set_time_sequence("step", step);
+        // println!("Step {}", step);
+
+        let x = step as f64;
+
+        let x = (x / 25.0).sin();
+        let joint = urdf
+            .get_joint_by_name("world_base_link_planar_prismatic_x")
+            .unwrap();
+
+        let joint_transform = urdf.compute_joint_transform(joint, x, false)?;
+
+        rec.log("/transforms", &joint_transform)?;
+    }
+
+    // // Animate:
+    // for step in 0..10000 {
+    //     rec.set_time_sequence("step", step);
+    //     for (joint_index, joint) in urdf.joints().enumerate() {
+    //         if joint.joint_type == urdf_rs::JointType::Revolute {
+    //             // Usually this angle would come from a measurement - here we just fake something:
+    //             let dynamic_angle = emath::remap(
+    //                 (step as f64 * (0.02 + joint_index as f64 / 100.0)).sin(),
+    //                 -1.0..=1.0,
+    //                 joint.limit.lower..=joint.limit.upper,
+    //             );
+
+    //             // Rerun loads the URDF transforms with child/parent frame relations.
+    //             // In order to move a joint, we just need to log a new transform between two of those frames.
+    //             //
+    //             // `compute_joint_transform` handles origin + axis-angle rotation and sets the
+    //             // parent/child frames according to the joint.
+    //             let joint_transform = urdf.compute_joint_transform(joint, dynamic_angle, true)?;
+
+    //             rec.log("/transforms", &joint_transform)?;
+    //         }
+    //     }
+    // }
+
+    Ok(())
+}
+
+
+
+
+use std::f32::consts::PI;
+
+use rerun::external::re_importer::UrdfTree;
+use rerun::{CoordinateFrame, TransformAxes3D};
+
+use rerun::external::{anyhow, re_log, urdf_rs};
+
+use k::prelude::*;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    re_log::setup_logging();
+
+    let rec = rerun::RecordingStreamBuilder::new("urdf_view").spawn()?;
+
+    let urdf_path = "assets/rox_diff_ur5e.urdf";
+
+    let chain = k::Chain::<f64>::from_urdf_file(urdf_path).unwrap();
+    // for joint in chain.iter_joints() {
+    //     println!("{}: {:?}", joint.name, joint.joint_type);
+    // }
+    // println!("Num movable joints: {}", chain.dof());
+    // let movable_joints = chain.iter().map(|node| node.joint().is_movable())
+    // println!("chain: {chain}");
+
+    let end = chain.find("ur5ewrist_3_joint").ok_or("joint_not_found")?;
+    let serial_chain = k::SerialChain::from_end(end);
+    println!("serial chain: {serial_chain}");
+    for joint in serial_chain.iter_joints() {
+        println!("{}: {:?}", joint.name, joint.joint_type);
+    }
+    println!("Num movable joints: {}", chain.dof());
+
+    rec.log_file_from_path(urdf_path, None, true)?;
+
+    let urdf = UrdfTree::from_file_path(urdf_path, None)?;
+
+    // println!("Joints:");
+    // for joint in urdf.joints() {
+    //     println!("name: {}, type: {:?}", joint.name, joint.joint_type);
+    //     if joint.name == "ur5eshoulder_pan_joint" {
+    //         let joint_transform = urdf.compute_joint_transform(joint, 3.14159, true)?;
+    //         rec.log("/transforms", &joint_transform)?;
+    //     }
+    // }
+
+    let mut links: Vec<&str> = vec![urdf.root().name.as_str()];
+    links.extend(urdf.joints().map(|j| j.child.link.as_str()));
+
+    for link in links {
+        let path = format!("axes/{}", link);
+        rec.log_static(path.clone(), &rerun::CoordinateFrame::new(link))?;
+        rec.log_static(path, &rerun::TransformAxes3D::new(0.1))?;
+    }
+
+    // 1. Define where "goal_frame" sits, relative to an existing frame.
+    rec.log_static(
+        "goal_transform",
+        &rerun::Transform3D::new()
+            .with_translation([-1.0, -1.0, 1.0])
+            .with_rotation_axis_angle(rerun::RotationAxisAngle::new(
+                [1.0, 0.0, 0.0],
+                rerun::Angle::from_radians(PI),
+            ))
+            .with_parent_frame("world") // must match a real URDF frame
+            .with_child_frame("goal_frame"),
+    )?;
+
+    // 2. Draw axes at that frame — identical to the link loop.
+    rec.log_static("axes/goal", &rerun::CoordinateFrame::new("goal_frame"))?;
+    rec.log_static("axes/goal", &rerun::TransformAxes3D::new(0.1))?;
+
+    let target_link = serial_chain.find("root").unwrap();
+    serial_chain.update_transforms();
+    let mut target = target_link.world_transform().unwrap();
+    target.translation.vector.x += -1.0;
+    target.translation.vector.y += -1.0;
+    target.translation.vector.z += 1.0;
+
+    // target.rotation.vector.i = 1.0;
+    // target.rotation.vector.j = 0.0;
+    // target.rotation.vector.k = 0.0;
+    // target.rotation.vector.w = 0.0;
+
+    target.rotation =
+        k::nalgebra::UnitQuaternion::from_axis_angle(&k::nalgebra::Vector3::x_axis(), PI.into());
+
+    let solver = k::JacobianIkSolver::new(0.01, 0.01, 0.5, 100);
+
+    println!("initial angles={:?}", chain.joint_positions());
+
+    solver.solve(&serial_chain, &target).unwrap();
+
+    println!("solved angles={:?}", chain.joint_positions());
+
+    let names: Vec<String> = serial_chain.iter_joints().map(|j| j.name.clone()).collect();
+    let positions = serial_chain.joint_positions();
+
+    rec.set_time_sequence("step", 0);
+    for (name, position) in names.iter().zip(&positions) {
+        let joint = urdf
+            .get_joint_by_name(name)
+            .ok_or_else(|| format!("no urdf joint named {name}"))?;
+        let joint_transform = urdf.compute_joint_transform(joint, *position, false)?;
+        rec.log("/transforms", &joint_transform)?;
+    }
+
+    // for step in 0..1 {
+    //     rec.set_time_sequence("step", step);
+    //     let mut idx = 0;
+    //     for joint in serial_chain.iter_joints() {
+    //         // println!("{}: {:?}", joint.name, joint.joint_type);
+    //         let joint = urdf.get_joint_by_name(&joint.name).unwrap();
+
+    //         let joint_transform =
+    //             urdf.compute_joint_transform(joint, chain.joint_positions()[idx], false)?;
+
+    //         rec.log("/transforms", &joint_transform)?;
+
+    //         idx += 1;
+    //     }
+    // }
+    // for joint in urdf.joints() {
+    //     // println!("name: {}, type: {:?}", joint.name, joint.joint_type);
+    //     // if joint.name == "ur5eshoulder_pan_joint" {
+    //     //     let joint_transform = urdf.compute_joint_transform(joint, 3.14159, true)?;
+    //     //     rec.log("/transforms", &joint_transform)?;
+    //     // }
+
+    //     idx += 1;
+    // }
+
+    // for step in 0..10000 {
+    //     rec.set_time_sequence("step", step);
+
+    //     let x = step as f64;
+
+    //     let x = (x / 25.0).sin();
+    //     let joint = urdf
+    //         .get_joint_by_name("world_base_link_planar_prismatic_x")
+    //         .unwrap();
+
+    //     let joint_transform = urdf.compute_joint_transform(joint, x, false)?;
+
+    //     rec.log("/transforms", &joint_transform)?;
+    // }
+
+    Ok(())
+}

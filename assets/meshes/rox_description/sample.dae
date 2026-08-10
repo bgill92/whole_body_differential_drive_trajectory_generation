@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <asset>
+    <contributor>
+      <author>Blender User</author>
+      <authoring_tool>Blender 3.6.5 commit date:2023-10-16, commit time:14:30, hash:cf1e1ed46b7e</authoring_tool>
+    </contributor>
+    <created>2023-10-23T14:02:40</created>
+    <modified>2023-10-23T14:02:40</modified>
+    <unit name="meter" meter="1"/>
+    <up_axis>Z_UP</up_axis>
+  </asset>
+  <library_images/>
+  <library_materials>
+    <material id="_55_255_255-material" name="255,255,255">
+      <instance_effect url="#_55_255_255-effect"/>
+    </material>
+  </library_materials>
+  <library_geometries>
+    <geometry id="ROX_Sanctuary_Simple_Platte-mesh" name="ROX Sanctuary Simple Platte">
+      <mesh>
+        <source id="ROX_Sanctuary_Simple_Platte-mesh-positions">
+          <float_array id="ROX_Sanctuary_Simple_Platte-mesh-positions-array" count="24">-300 -515 -48 -300 -515 0 -300 515 -48 -300 515 0 300 -515 -48 300 -515 0 300 515 -48 300 515 0</float_array>
+          <technique_common>
+            <accessor source="#ROX_Sanctuary_Simple_Platte-mesh-positions-array" count="8" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="ROX_Sanctuary_Simple_Platte-mesh-normals">
+          <float_array id="ROX_Sanctuary_Simple_Platte-mesh-normals-array" count="18">0 1 0 -1 0 0 0 -1 0 1 0 0 0 0 1 0 0 -1</float_array>
+          <technique_common>
+            <accessor source="#ROX_Sanctuary_Simple_Platte-mesh-normals-array" count="6" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="ROX_Sanctuary_Simple_Platte-mesh-map-0">
+          <float_array id="ROX_Sanctuary_Simple_Platte-mesh-map-0-array" count="72">0 0 2.380805 0 0 0.190464 0 0.190464 2.380805 0 2.380805 0.190464 0 0 4.087048 0 0 0.190464 0 0.190464 4.087048 0 4.087048 0.190464 0 0 2.380805 0 0 0.190464 0 0.190464 2.380805 0 2.380805 0.190464 0 0 4.087048 0 0 0.190464 0 0.190464 4.087048 0 4.087048 0.190464 1.190402 2.043524 -1.190402 2.043524 1.190402 -2.043524 1.190402 -2.043524 -1.190402 2.043524 -1.190402 -2.043524 -1.190402 -2.043524 1.190402 -2.043524 -1.190402 2.043524 -1.190402 2.043524 1.190402 -2.043524 1.190402 2.043524</float_array>
+          <technique_common>
+            <accessor source="#ROX_Sanctuary_Simple_Platte-mesh-map-0-array" count="36" stride="2">
+              <param name="S" type="float"/>
+              <param name="T" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="ROX_Sanctuary_Simple_Platte-mesh-vertices">
+          <input semantic="POSITION" source="#ROX_Sanctuary_Simple_Platte-mesh-positions"/>
+        </vertices>
+        <triangles material="_55_255_255-material" count="12">
+          <input semantic="VERTEX" source="#ROX_Sanctuary_Simple_Platte-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#ROX_Sanctuary_Simple_Platte-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#ROX_Sanctuary_Simple_Platte-mesh-map-0" offset="2" set="0"/>
+          <p>3 0 0 7 0 1 2 0 2 2 0 3 7 0 4 6 0 5 1 1 6 3 1 7 0 1 8 0 1 9 3 1 10 2 1 11 5 2 12 1 2 13 4 2 14 4 2 15 1 2 16 0 2 17 7 3 18 5 3 19 6 3 20 6 3 21 5 3 22 4 3 23 7 4 24 3 4 25 5 4 26 5 4 27 3 4 28 1 4 29 4 5 30 0 5 31 6 5 32 6 5 33 0 5 34 2 5 35</p>
+        </triangles>
+      </mesh>
+    </geometry>
+  </library_geometries>
+  <library_visual_scenes>
+    <visual_scene id="Scene" name="Scene">
+      <node id="ROX_Sanctuary_Simple_Platte" name="ROX Sanctuary Simple Platte" type="NODE">
+        <matrix sid="transform">-0.01 0 -8.74228e-10 0 0 0.01 0 0 8.74228e-10 0 -0.01 0 0 0 0 1</matrix>
+        <instance_geometry url="#ROX_Sanctuary_Simple_Platte-mesh" name="ROX Sanctuary Simple Platte">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="_55_255_255-material" target="#_55_255_255-material">
+                <bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0"/>
+              </instance_material>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+    </visual_scene>
+  </library_visual_scenes>
+  <scene>
+    <instance_visual_scene url="#Scene"/>
+  </scene>
+</COLLADA>
