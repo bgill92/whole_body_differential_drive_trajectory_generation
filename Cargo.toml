@@ -3,6 +3,10 @@ name = "whole_body_differential_drive_trajectory_generation"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "wbdd"
+path = "src/lib.rs"
+
 [dependencies]
 emath = "0.35.0"
 k = "0.32.0"

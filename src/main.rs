@@ -1,52 +1,10 @@
 use rerun::external::re_importer::UrdfTree;
-use rerun::{CoordinateFrame, TransformAxes3D};
 
-use rerun::external::{anyhow, re_log, urdf_rs};
+use rerun::external::re_log;
 
 use k::prelude::*;
 
-/// A pose written as translation + roll-pitch-yaw, so the YAML stays readable.
-///
-/// `Isometry3` can serde directly (nalgebra's `serde-serialize` feature), but
-/// its wire format is a raw quaternion -- nobody hand-writes that.
-#[derive(serde::Deserialize)]
-struct Pose {
-    xyz: [f64; 3],
-    rpy: [f64; 3],
-}
-
-#[derive(serde::Deserialize)]
-struct SolverConfig {
-    allowable_target_distance: f64,
-    allowable_target_angle: f64,
-    jacobian_multiplier: f64,
-    num_max_try: usize,
-}
-
-#[derive(serde::Deserialize)]
-struct DifferentialIkConfig {
-    num_steps: usize,
-    pseudo_inverse_epsilon: f64,
-    step_size: f64,
-}
-
-#[derive(serde::Deserialize)]
-struct Config {
-    urdf_path: String,
-    end_joint: String,
-    goal: Pose,
-    solver: SolverConfig,
-    differential_ik: DifferentialIkConfig,
-}
-
-impl Pose {
-    fn to_isometry(&self) -> k::Isometry3<f64> {
-        k::Isometry3::from_parts(
-            k::nalgebra::Translation3::new(self.xyz[0], self.xyz[1], self.xyz[2]),
-            k::nalgebra::UnitQuaternion::from_euler_angles(self.rpy[0], self.rpy[1], self.rpy[2]),
-        )
-    }
-}
+use wbdd::{Config, DifferentialIkConfig, SolverConfig};
 
 pub struct Kinematics {
     pub chain: k::Chain<f64>,
@@ -154,7 +112,7 @@ fn differential_ik(
         let current_joint_positions =
             k::nalgebra::DVector::from_vec(kinematics.serial_chain.joint_positions());
 
-        let inv_jacobian = k::jacobian(&kinematics.serial_chain)
+        let _inv_jacobian = k::jacobian(&kinematics.serial_chain)
             .pseudo_inverse(config.pseudo_inverse_epsilon)
             .unwrap();
 
@@ -225,7 +183,8 @@ fn differential_ik(
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, se3_log};
+    use super::se3_log;
+    use crate::Config;
     use k::nalgebra::{Isometry3, Matrix4, UnitQuaternion, Vector3};
 
     // The shipped config must stay parseable and produce the pose it spells out.
