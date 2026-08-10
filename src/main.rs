@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     kinematics.serial_chain.update_transforms();
 
-    let joint_positions = differential_ik(&goal, &kinematics, &config.differential_ik);
+    let joint_positions = differential_ik(&goal, &kinematics, &config.differential_ik)?;
 
     // kinematics.solve(&target)?;
 

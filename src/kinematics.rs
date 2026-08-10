@@ -90,46 +90,94 @@ impl Kinematics {
 }
 
 /// Solve inverse kinematics using differential IK (damped least squares).
+///
+/// Iteratively advances joint positions along the pseudo-inverse Jacobian
+/// direction to minimize the twist error between current and goal pose.
+/// Uses damped least squares (Levenberg-Marquardt) for numerical stability
+/// near singularities.
+///
+/// # Arguments
+/// * `goal_pose` - Target end-effector pose in world frame
+/// * `kinematics` - Kinematics struct containing chain and solver
+/// * `config` - Configuration including steps, damping, and convergence threshold
+///
+/// # Returns
+/// `Ok` with vector of joint position snapshots, one per iteration (including initial state).
+/// Length ≤ `config.num_steps + 1`, stops early if converged.
+/// `Err` if the current pose is singular or matrix inversion fails.
+///
+/// # Algorithm
+/// For each iteration:
+/// 1. Compute current end-effector pose
+/// 2. Calculate relative transform: goal * current⁻¹
+/// 3. Extract twist via se3_log (matrix logarithm)
+/// 4. Check convergence: if twist norm < threshold, stop
+/// 5. Compute damped pseudo-inverse of Jacobian (cached once per iteration)
+/// 6. Update joints: q_new = q_old + J†_damp * twist
+/// 7. Feed back updated positions to chain for next iteration
 pub fn differential_ik(
     goal_pose: &k::Isometry3<f64>,
     kinematics: &Kinematics,
     config: &DifferentialIkConfig,
-) -> Vec<Vec<f64>> {
+) -> Result<Vec<Vec<f64>>, &'static str> {
+    // Convert goal to homogeneous matrix for composition
     let goal_pose = goal_pose.to_homogeneous();
 
+    // Initialize trajectory log with starting configuration
     let mut joint_positions: Vec<Vec<f64>> = vec![];
     joint_positions.push(kinematics.serial_chain.joint_positions());
+
     for _ in 0..config.num_steps {
+        // Current end-effector pose in world frame
         let current_pose = kinematics.serial_chain.end_transform().to_homogeneous();
 
-        let current_pose_inverted = current_pose.try_inverse().unwrap();
-
+        // Compute relative error transform: T_err = T_goal * T_current⁻¹
+        // This gives the transform from current to goal
+        let current_pose_inverted = current_pose.try_inverse().ok_or("singular_current_pose")?;
         let temp = goal_pose * current_pose_inverted;
 
+        // Convert relative pose to body twist [v; omega]
+        // twist represents instantaneous velocity needed to reach goal
         let twist = se3_log(&temp);
 
+        // Check convergence: if twist norm is small enough, we're done
+        if twist.norm() < config.convergence_threshold {
+            break;
+        }
+
+        // Read current joint configuration as nalgebra vector
         let current_joint_positions =
             k::nalgebra::DVector::from_vec(kinematics.serial_chain.joint_positions());
 
-        let lambda = 0.5;
+        // Cache Jacobian: compute once per iteration, reuse for DLS computation
+        let jacobian = k::jacobian(&kinematics.serial_chain);
+        let j_transpose = jacobian.transpose();
 
-        let dls_term = k::jacobian(&kinematics.serial_chain).transpose()
-            * (k::jacobian(&kinematics.serial_chain)
-                * k::jacobian(&kinematics.serial_chain).transpose()
-                + f64::powf(lambda, 2.0) * k::nalgebra::DMatrix::identity(6, 6))
-            .try_inverse()
-            .unwrap();
+        // Damping factor from config for numerical stability near singularities
+        let lambda = config.damping_factor;
 
+        // Damped least squares pseudo-inverse: J†_damp = Jᵀ * (J*Jᵀ + λ²*I)⁻¹
+        // Avoids singularity issues when J is rank-deficient
+        let j_times_jt = jacobian * j_transpose.clone();
+        let regularization = f64::powf(lambda, 2.0) * k::nalgebra::DMatrix::identity(6, 6);
+        let dls_term = j_transpose
+            * (j_times_jt + regularization)
+                .try_inverse()
+                .ok_or("matrix_inversion_failed")?;
+
+        // Gradient step: q_new = q_old + J†_damp * twist
         let updated_joint_positions = current_joint_positions + dls_term * twist;
 
+        // Feed back to chain for next iteration's Jacobian computation
         kinematics
             .serial_chain
             .set_joint_positions_unchecked(updated_joint_positions.as_slice());
 
+        // Record trajectory snapshot
         joint_positions.push(kinematics.serial_chain.joint_positions());
     }
 
-    joint_positions
+    Ok(joint_positions)
 }
 
 #[cfg(test)]

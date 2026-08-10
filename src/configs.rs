@@ -21,6 +21,8 @@ pub struct DifferentialIkConfig {
     pub num_steps: usize,
     pub pseudo_inverse_epsilon: f64,
     pub step_size: f64,
+    pub damping_factor: f64,
+    pub convergence_threshold: f64,
 }
 
 #[derive(serde::Deserialize)]

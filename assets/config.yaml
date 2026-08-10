@@ -17,3 +17,5 @@ differential_ik:
   num_steps: 25
   pseudo_inverse_epsilon: 0.000001
   step_size: 0.5
+  damping_factor: 0.5
+  convergence_threshold: 0.01

@@ -93,3 +93,10 @@ Known failure: `configs::tests::config_parses` asserts a goal translation of
 `(-1, -1, 1)` while `assets/config.yaml` specifies `[1.0, 1.0, 1.0]`. This
 predates the library split. Do not "fix" it by editing whichever side is
 convenient — it is unresolved which one is correct.
+
+## Matrix Algebra
+
+**Never change the order of matrix multiplication or division.** Matrices are
+non-commutative: `A * B ≠ B * A` in general. A transpose on the wrong side of
+a product (`(AB)ᵀ = BᵀAᵀ`, not `AᵀBᵀ`) causes silent type mismatches or runtime
+panics when dimensions don't align.
