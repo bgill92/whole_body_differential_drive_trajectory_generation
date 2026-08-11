@@ -108,41 +108,49 @@ fn resolve_equality_constraints(
     Ok(resolved)
 }
 
-/// Build constraint matrix A for KKT system.
-/// Each row has a single 1.0 at the constrained joint index.
-fn build_constraint_matrix(
-    constraints: &[(usize, f64)],
-    num_joints: usize,
-) -> k::nalgebra::DMatrix<f64> {
-    if constraints.is_empty() {
-        return k::nalgebra::DMatrix::zeros(0, num_joints);
+/// Solve using KKT system with optional equality constraints.
+/// Returns (updated_joint_positions, lagrange_multipliers).
+/// When no constraints: uses damped least squares, returns empty multipliers.
+/// When constraints present: solves full KKT system, returns non-zero multipliers.
+fn solve_kkt_with_constraints(
+    jacobian: &k::nalgebra::DMatrix<f64>,
+    twist: &k::nalgebra::Vector6<f64>,
+    constraints: Option<&[(usize, f64)]>,
+    current_positions: &k::nalgebra::DVector<f64>,
+    damping_factor: f64,
+) -> (k::nalgebra::DVector<f64>, k::nalgebra::DVector<f64>) {
+    let n = jacobian.ncols();
+    let constraints = constraints.unwrap_or(&[]);
+    let m = constraints.len();
+
+    // Convert fixed-size twist to dynamic
+    let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
+
+    // No constraints: use damped least squares (Jᵀ * (J*Jᵀ + λ²*I)⁻¹ * twist)
+    if m == 0 {
+        let j_transpose = jacobian.transpose();
+        let j_times_jt = jacobian * &j_transpose;
+        let regularization = damping_factor.powi(2)
+            * k::nalgebra::DMatrix::identity(jacobian.nrows(), jacobian.nrows());
+        let dq = &j_transpose
+            * (j_times_jt + regularization)
+                .lu()
+                .solve(&twist_dyn)
+                .unwrap();
+        return (current_positions + dq, k::nalgebra::DVector::zeros(0));
     }
 
-    let mut a = k::nalgebra::DMatrix::<f64>::zeros(constraints.len(), num_joints);
+    // Constraints present: build and solve full KKT system
+    let j_transpose = jacobian.transpose();
+
+    // H = Jᵀ * J + λ² * I (regularized Hessian)
+    let h = &j_transpose * jacobian + damping_factor.powi(2) * k::nalgebra::DMatrix::identity(n, n);
+
+    // Build constraint matrix A (each row has single 1.0 at constrained joint index)
+    let mut a = k::nalgebra::DMatrix::<f64>::zeros(m, n);
     for (r, (idx, _value)) in constraints.iter().enumerate() {
         a[(r, *idx)] = 1.0;
     }
-    a
-}
-
-/// Build KKT system matrix and RHS vector.
-/// Returns (H_kkt, rhs) where H_kkt * [dq; lambdas] = rhs
-fn build_kkt_system(
-    jacobian: &k::nalgebra::DMatrix<f64>,
-    twist: &k::nalgebra::Vector6<f64>,
-    constraints: &[(usize, f64)],
-    current_positions: &k::nalgebra::DVector<f64>,
-    damping_factor: f64,
-) -> (k::nalgebra::DMatrix<f64>, k::nalgebra::DVector<f64>) {
-    let n = jacobian.ncols();
-    let m = constraints.len();
-
-    // H = Jᵀ * J + λ² * I (regularized Hessian)
-    let j_transpose = jacobian.transpose();
-    let h = &j_transpose * jacobian + damping_factor.powi(2) * k::nalgebra::DMatrix::identity(n, n);
-
-    // Build constraint matrix A
-    let a = build_constraint_matrix(constraints, n);
 
     // KKT matrix: [[H, Aᵀ], [A, 0]]
     let mut kkt = k::nalgebra::DMatrix::<f64>::zeros(n + m, n + m);
@@ -151,42 +159,21 @@ fn build_kkt_system(
     kkt.slice_mut((n, 0), (m, n)).copy_from(&a);
 
     // RHS: [Jᵀ * twist; residuals]
-    // Convert fixed-size twist to dynamic for matrix multiply
-    let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
     let mut rhs = k::nalgebra::DVector::<f64>::zeros(n + m);
     rhs.rows_mut(0, n).copy_from(&(&j_transpose * &twist_dyn));
     for (r, (idx, target_value)) in constraints.iter().enumerate() {
         rhs[n + r] = target_value - current_positions[*idx];
     }
 
-    (kkt, rhs)
-}
+    // Solve KKT system
+    let solution = kkt.lu().solve(&rhs).unwrap();
 
-/// Solve using damped least squares pseudo-inverse.
-/// dq = J†_damp * twist = Jᵀ * (J*Jᵀ + λ²*I)⁻¹ * twist
-fn solve_damped_least_squares(
-    jacobian: &k::nalgebra::DMatrix<f64>,
-    twist: &k::nalgebra::Vector6<f64>,
-    current_positions: &k::nalgebra::DVector<f64>,
-    damping_factor: f64,
-) -> k::nalgebra::DVector<f64> {
-    let j_transpose = jacobian.transpose();
-    let m = jacobian.nrows();
+    // Extract dq (first n components) and lambdas (last m components)
+    let dq = solution.rows(0, n);
+    let mut lambdas = k::nalgebra::DVector::<f64>::zeros(m);
+    lambdas.copy_from(&solution.rows(n, m));
 
-    // Convert fixed-size twist to dynamic
-    let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
-
-    // J*Jᵀ + λ²*I
-    let j_times_jt = jacobian * &j_transpose;
-    let regularization = damping_factor.powi(2) * k::nalgebra::DMatrix::identity(m, m);
-
-    // (J*Jᵀ + λ²*I)⁻¹
-    let inverse = j_times_jt + regularization;
-
-    // J†_damp = Jᵀ * (J*Jᵀ + λ²*I)⁻¹
-    let dq = &j_transpose * inverse.lu().solve(&twist_dyn).unwrap();
-
-    current_positions + dq
+    (current_positions + dq, lambdas)
 }
 
 /// Solve inverse kinematics using differential IK.
@@ -230,28 +217,18 @@ pub fn differential_ik(
         // Cache Jacobian
         let jacobian = k::jacobian(&kinematics.serial_chain);
 
-        // Choose solve method based on constraints
-        let updated_joint_positions = if constraints.is_empty() {
-            // No constraints: use damped least squares
-            solve_damped_least_squares(
-                &jacobian,
-                &twist,
-                &current_joint_positions,
-                config.damping_factor,
-            )
-        } else {
-            // Constraints present: use KKT system
-            let (kkt_matrix, rhs) = build_kkt_system(
-                &jacobian,
-                &twist,
-                &constraints,
-                &current_joint_positions,
-                config.damping_factor,
-            );
-            let solution = kkt_matrix.lu().solve(&rhs).unwrap();
-            // Extract dq from first n components
-            current_joint_positions + solution.rows(0, kinematics.serial_chain.dof())
-        };
+        // Solve KKT system (handles both constrained and unconstrained cases)
+        let (updated_joint_positions, _lagrange_multipliers) = solve_kkt_with_constraints(
+            &jacobian,
+            &twist,
+            if constraints.is_empty() {
+                None
+            } else {
+                Some(&constraints)
+            },
+            &current_joint_positions,
+            config.damping_factor,
+        );
 
         // Feed back to chain for next iteration's Jacobian computation
         kinematics
