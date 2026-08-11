@@ -17,12 +17,23 @@ pub struct SolverConfig {
 }
 
 #[derive(serde::Deserialize)]
+pub struct EqualityConstraint {
+    /// Joint name (must exist in the serial chain)
+    pub joint_name: String,
+    /// Target value for this joint
+    pub target_value: f64,
+}
+
+#[derive(serde::Deserialize)]
 pub struct DifferentialIkConfig {
     pub num_steps: usize,
     pub pseudo_inverse_epsilon: f64,
     pub step_size: f64,
     pub damping_factor: f64,
     pub convergence_threshold: f64,
+    /// Optional equality constraints: joints forced to specific values each iteration
+    #[serde(default)]
+    pub equality_constraints: Vec<EqualityConstraint>,
 }
 
 #[derive(serde::Deserialize)]

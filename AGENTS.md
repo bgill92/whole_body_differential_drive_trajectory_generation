@@ -89,6 +89,12 @@ module that no longer compiles goes unnoticed.
 The crate builds warning-clean; a new `unused`/`dead_code` warning means either
 the code is unreachable or it is wired up wrong.
 
+## Git Workflow
+
+**Never commit or push without explicit request.** Stage changes and wait for
+clear user instruction. This repo is your working directory, not an auto-pushed
+branch.
+
 Known failure: `configs::tests::config_parses` asserts a goal translation of
 `(-1, -1, 1)` while `assets/config.yaml` specifies `[1.0, 1.0, 1.0]`. This
 predates the library split. Do not "fix" it by editing whichever side is
