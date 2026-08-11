@@ -108,7 +108,89 @@ fn resolve_equality_constraints(
     Ok(resolved)
 }
 
-/// Solve inverse kinematics using differential IK (damped least squares).
+/// Build constraint matrix A for KKT system.
+/// Each row has a single 1.0 at the constrained joint index.
+fn build_constraint_matrix(
+    constraints: &[(usize, f64)],
+    num_joints: usize,
+) -> k::nalgebra::DMatrix<f64> {
+    if constraints.is_empty() {
+        return k::nalgebra::DMatrix::zeros(0, num_joints);
+    }
+
+    let mut a = k::nalgebra::DMatrix::<f64>::zeros(constraints.len(), num_joints);
+    for (r, (idx, _value)) in constraints.iter().enumerate() {
+        a[(r, *idx)] = 1.0;
+    }
+    a
+}
+
+/// Build KKT system matrix and RHS vector.
+/// Returns (H_kkt, rhs) where H_kkt * [dq; lambdas] = rhs
+fn build_kkt_system(
+    jacobian: &k::nalgebra::DMatrix<f64>,
+    twist: &k::nalgebra::Vector6<f64>,
+    constraints: &[(usize, f64)],
+    current_positions: &k::nalgebra::DVector<f64>,
+    damping_factor: f64,
+) -> (k::nalgebra::DMatrix<f64>, k::nalgebra::DVector<f64>) {
+    let n = jacobian.ncols();
+    let m = constraints.len();
+
+    // H = Jᵀ * J + λ² * I (regularized Hessian)
+    let j_transpose = jacobian.transpose();
+    let h = &j_transpose * jacobian + damping_factor.powi(2) * k::nalgebra::DMatrix::identity(n, n);
+
+    // Build constraint matrix A
+    let a = build_constraint_matrix(constraints, n);
+
+    // KKT matrix: [[H, Aᵀ], [A, 0]]
+    let mut kkt = k::nalgebra::DMatrix::<f64>::zeros(n + m, n + m);
+    kkt.slice_mut((0, 0), (n, n)).copy_from(&h);
+    kkt.slice_mut((0, n), (n, m)).copy_from(&a.transpose());
+    kkt.slice_mut((n, 0), (m, n)).copy_from(&a);
+
+    // RHS: [Jᵀ * twist; residuals]
+    // Convert fixed-size twist to dynamic for matrix multiply
+    let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
+    let mut rhs = k::nalgebra::DVector::<f64>::zeros(n + m);
+    rhs.rows_mut(0, n).copy_from(&(&j_transpose * &twist_dyn));
+    for (r, (idx, target_value)) in constraints.iter().enumerate() {
+        rhs[n + r] = target_value - current_positions[*idx];
+    }
+
+    (kkt, rhs)
+}
+
+/// Solve using damped least squares pseudo-inverse.
+/// dq = J†_damp * twist = Jᵀ * (J*Jᵀ + λ²*I)⁻¹ * twist
+fn solve_damped_least_squares(
+    jacobian: &k::nalgebra::DMatrix<f64>,
+    twist: &k::nalgebra::Vector6<f64>,
+    current_positions: &k::nalgebra::DVector<f64>,
+    damping_factor: f64,
+) -> k::nalgebra::DVector<f64> {
+    let j_transpose = jacobian.transpose();
+    let m = jacobian.nrows();
+
+    // Convert fixed-size twist to dynamic
+    let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
+
+    // J*Jᵀ + λ²*I
+    let j_times_jt = jacobian * &j_transpose;
+    let regularization = damping_factor.powi(2) * k::nalgebra::DMatrix::identity(m, m);
+
+    // (J*Jᵀ + λ²*I)⁻¹
+    let inverse = j_times_jt + regularization;
+
+    // J†_damp = Jᵀ * (J*Jᵀ + λ²*I)⁻¹
+    let dq = &j_transpose * inverse.lu().solve(&twist_dyn).unwrap();
+
+    current_positions + dq
+}
+
+/// Solve inverse kinematics using differential IK.
+/// Uses KKT when equality constraints exist, otherwise damped least squares.
 pub fn differential_ik(
     goal_pose: &k::Isometry3<f64>,
     kinematics: &Kinematics,
@@ -116,11 +198,6 @@ pub fn differential_ik(
 ) -> Result<Vec<Vec<f64>>, String> {
     // Resolve constraint joint names to indices once at startup
     let constraints = resolve_equality_constraints(&kinematics.serial_chain, config)?;
-    let mut A =
-        k::nalgebra::DMatrix::<f64>::zeros(constraints.len(), kinematics.serial_chain.dof());
-    for (r, (idx, _value)) in constraints.iter().enumerate() {
-        A[(r, *idx)] = 1.0;
-    }
 
     let goal_pose = goal_pose.to_homogeneous();
 
@@ -133,17 +210,15 @@ pub fn differential_ik(
         let current_pose = kinematics.serial_chain.end_transform().to_homogeneous();
 
         // Compute relative error transform: T_err = T_goal * T_current⁻¹
-        // This gives the transform from current to goal
         let current_pose_inverted = current_pose
             .try_inverse()
             .ok_or("singular_current_pose".to_string())?;
         let temp = goal_pose * current_pose_inverted;
 
         // Convert relative pose to body twist [v; omega]
-        // twist represents instantaneous velocity needed to reach goal
         let twist = se3_log(&temp);
 
-        // Check convergence: if twist norm is small enough, we're done
+        // Check convergence
         if twist.norm() < config.convergence_threshold {
             break;
         }
@@ -152,59 +227,31 @@ pub fn differential_ik(
         let current_joint_positions =
             k::nalgebra::DVector::from_vec(kinematics.serial_chain.joint_positions());
 
-        // Cache Jacobian: compute once per iteration, reuse for DLS computation
+        // Cache Jacobian
         let jacobian = k::jacobian(&kinematics.serial_chain);
-        let j_transpose = jacobian.transpose();
 
-        // Damping factor from config for numerical stability near singularities
-        let lambda = config.damping_factor;
-
-        let regularization = f64::powf(lambda, 2.0)
-            * k::nalgebra::DMatrix::identity(
-                kinematics.serial_chain.dof(),
-                kinematics.serial_chain.dof(),
+        // Choose solve method based on constraints
+        let updated_joint_positions = if constraints.is_empty() {
+            // No constraints: use damped least squares
+            solve_damped_least_squares(
+                &jacobian,
+                &twist,
+                &current_joint_positions,
+                config.damping_factor,
+            )
+        } else {
+            // Constraints present: use KKT system
+            let (kkt_matrix, rhs) = build_kkt_system(
+                &jacobian,
+                &twist,
+                &constraints,
+                &current_joint_positions,
+                config.damping_factor,
             );
-
-        // This solves the equality constraints
-        let H = (&j_transpose * &jacobian) + &regularization;
-
-        let n = kinematics.serial_chain.dof();
-        let m = constraints.len();
-
-        let mut kkt = k::nalgebra::DMatrix::<f64>::zeros(n + m, n + m);
-        kkt.slice_mut((0, 0), (n, n)).copy_from(&H);
-        kkt.slice_mut((0, n), (n, m)).copy_from(&A.transpose());
-        kkt.slice_mut((n, 0), (m, n)).copy_from(&A);
-
-        // RHS of the KKT system: [g; b].
-        //
-        // g = Jᵀ * twist is the gradient of the tracking objective -- the same
-        // quantity the damped-least-squares step multiplies, before the inverse.
-        //
-        // b is the constraint residual: how far each constrained joint still has
-        // to move to reach its target. Using (target - current) rather than the
-        // target itself is what makes this a step in dq, matching H and g, which
-        // are also expressed in dq.
-        let mut rhs = k::nalgebra::DVector::<f64>::zeros(n + m);
-        rhs.rows_mut(0, n).copy_from(&(&j_transpose * twist));
-        for (r, (idx, target_value)) in constraints.iter().enumerate() {
-            rhs[n + r] = target_value - current_joint_positions[*idx];
-        }
-
-        let updated_joint_positions =
-            current_joint_positions + kkt.lu().solve(&rhs).unwrap().rows(0, n);
-
-        // // Damped least squares pseudo-inverse: J†_damp = Jᵀ * (J*Jᵀ + λ²*I)⁻¹
-        // // Avoids singularity issues when J is rank-deficient
-        // let j_times_jt = jacobian * &j_transpose;
-        // let regularization = f64::powf(lambda, 2.0) * k::nalgebra::DMatrix::identity(6, 6);
-        // let dls_term = j_transpose
-        //     * (j_times_jt + regularization)
-        //         .try_inverse()
-        //         .ok_or("matrix_inversion_failed".to_string())?;
-
-        // // Gradient step: q_new = q_old + J†_damp * twist
-        // let updated_joint_positions = current_joint_positions + dls_term * twist;
+            let solution = kkt_matrix.lu().solve(&rhs).unwrap();
+            // Extract dq from first n components
+            current_joint_positions + solution.rows(0, kinematics.serial_chain.dof())
+        };
 
         // Feed back to chain for next iteration's Jacobian computation
         kinematics
