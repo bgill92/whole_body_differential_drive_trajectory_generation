@@ -9,14 +9,6 @@ pub struct Pose {
 }
 
 #[derive(serde::Deserialize)]
-pub struct SolverConfig {
-    pub allowable_target_distance: f64,
-    pub allowable_target_angle: f64,
-    pub jacobian_multiplier: f64,
-    pub num_max_try: usize,
-}
-
-#[derive(serde::Deserialize)]
 pub struct EqualityConstraint {
     /// Joint name (must exist in the serial chain)
     pub joint_name: String,
@@ -27,8 +19,6 @@ pub struct EqualityConstraint {
 #[derive(serde::Deserialize)]
 pub struct DifferentialIkConfig {
     pub num_steps: usize,
-    pub pseudo_inverse_epsilon: f64,
-    pub step_size: f64,
     pub damping_factor: f64,
     pub convergence_threshold: f64,
     /// Optional equality constraints: joints forced to specific values each iteration
@@ -41,7 +31,6 @@ pub struct Config {
     pub urdf_path: String,
     pub end_joint: String,
     pub goal: Pose,
-    pub solver: SolverConfig,
     pub differential_ik: DifferentialIkConfig,
 }
 
@@ -58,13 +47,24 @@ impl Pose {
 mod tests {
     use super::*;
     use k::nalgebra::Vector3;
-    use serde_yaml_ng;
+
+    // Inline YAML so the test checks parsing, not the current tuning of
+    // assets/config.yaml.
+    const CONFIG_YAML: &str = "
+urdf_path: assets/rox_diff_ur5e.urdf
+end_joint: ur5ewrist_3_joint
+goal:
+  xyz: [-1.0, -1.0, 1.0]
+  rpy: [3.14159265358979, 0.0, 0.0]
+differential_ik:
+  num_steps: 25
+  damping_factor: 0.5
+  convergence_threshold: 0.01
+";
 
     #[test]
     fn config_parses() {
-        let config: Config =
-            serde_yaml_ng::from_str(&std::fs::read_to_string("assets/config.yaml").unwrap())
-                .unwrap();
+        let config: Config = serde_yaml_ng::from_str(CONFIG_YAML).unwrap();
         let goal = config.goal.to_isometry();
 
         assert_eq!(goal.translation.vector, Vector3::new(-1.0, -1.0, 1.0));

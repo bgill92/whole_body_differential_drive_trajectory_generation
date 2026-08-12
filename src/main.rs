@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let urdf_path = config.urdf_path.as_str();
 
-    let kinematics = Kinematics::build(urdf_path, &config.end_joint, &config.solver).unwrap();
+    let mut kinematics = Kinematics::build(urdf_path, &config.end_joint).unwrap();
 
     let goal = config.goal.to_isometry();
 
@@ -58,17 +58,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     rec.log_static("axes/goal", &rerun::CoordinateFrame::new("goal_frame"))?;
     rec.log_static("axes/goal", &rerun::TransformAxes3D::new(0.1))?;
 
-    kinematics.serial_chain.update_transforms();
+    let joint_positions = differential_ik(&goal, &mut kinematics, &config.differential_ik)?;
 
-    let joint_positions = differential_ik(&goal, &kinematics, &config.differential_ik)?;
+    let names = kinematics.joint_names();
 
-    // kinematics.solve(&target)?;
-
-    let (names, _) = kinematics.get_serial_chain_joint_names_and_positions();
-
-    for idx in 0..joint_positions.len() {
+    for (idx, positions) in joint_positions.iter().enumerate() {
         rec.set_time_sequence("step", idx as i64);
-        let positions = &joint_positions[idx];
         for (name, position) in names.iter().zip(positions) {
             let joint = urdf
                 .get_joint_by_name(name)
