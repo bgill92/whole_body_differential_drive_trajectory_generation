@@ -87,6 +87,82 @@ impl Kinematics {
         let positions = self.serial_chain.joint_positions();
         (names, positions)
     }
+
+    /// Joint lower and upper bounds for the serial chain.
+    /// Returns (lower_bounds, upper_bounds) aligned by index with iter_joints().
+    pub fn get_joint_limits(&self) -> (k::nalgebra::DVector<f64>, k::nalgebra::DVector<f64>) {
+        let n = self.serial_chain.iter_joints().count();
+        let mut lower = k::nalgebra::DVector::<f64>::zeros(n);
+        let mut upper = k::nalgebra::DVector::<f64>::zeros(n);
+
+        for (i, joint) in self.serial_chain.iter_joints().enumerate() {
+            // Joint.limits is Option<Range<f64>> with min/max fields;
+            // None means no limit (use -inf/+inf as sentinels).
+            if let Some(limits) = &joint.limits {
+                lower[i] = limits.min;
+                upper[i] = limits.max;
+            } else {
+                // No explicit limit: use wide sentinel bounds
+                lower[i] = f64::NEG_INFINITY;
+                upper[i] = f64::INFINITY;
+            }
+        }
+
+        (lower, upper)
+    }
+
+    /// Build active-set equality constraints from joints near their limits.
+    ///
+    /// Scans all joints and creates equality constraints for any joint within
+    /// `tolerance` of its lower or upper bound. Returns (A, residuals) for use
+    /// in the KKT solver:
+    /// - A is m×n matrix with single 1.0 per row at the constrained joint index
+    /// - residuals is length-m vector of (target_value - current_position)
+    ///
+    /// Joints with infinite bounds are never considered active.
+    pub fn build_joint_limit_constraints(
+        &self,
+        current_positions: &k::nalgebra::DVector<f64>,
+        tolerance: f64,
+    ) -> (
+        Option<k::nalgebra::DMatrix<f64>>,
+        Option<k::nalgebra::DVector<f64>>,
+    ) {
+        let (lower, upper) = self.get_joint_limits();
+        let mut active_indices: Vec<usize> = Vec::new();
+        let mut active_targets: Vec<f64> = Vec::new();
+
+        for i in 0..current_positions.len() {
+            let q = current_positions[i];
+
+            // Check lower limit (skip if unbounded)
+            if lower[i].is_finite() && (q - lower[i]).abs() <= tolerance {
+                active_indices.push(i);
+                active_targets.push(lower[i]);
+            }
+            // Check upper limit (skip if unbounded)
+            else if upper[i].is_finite() && (upper[i] - q).abs() <= tolerance {
+                active_indices.push(i);
+                active_targets.push(upper[i]);
+            }
+        }
+
+        if active_indices.is_empty() {
+            return (None, None);
+        }
+
+        let m = active_indices.len();
+        let n = current_positions.len();
+        let mut a = k::nalgebra::DMatrix::<f64>::zeros(m, n);
+        let mut residuals = k::nalgebra::DVector::<f64>::zeros(m);
+
+        for (row, (&idx, &target)) in active_indices.iter().zip(active_targets.iter()).enumerate() {
+            a[(row, idx)] = 1.0;
+            residuals[row] = target - current_positions[idx];
+        }
+
+        (Some(a), Some(residuals))
+    }
 }
 
 /// Resolve equality constraints to (index, value) pairs.
@@ -217,14 +293,28 @@ pub fn differential_ik(
         // Cache Jacobian
         let jacobian = k::jacobian(&kinematics.serial_chain);
 
+        // Build joint limit constraints using active-set method
+        let (limit_a, limit_residuals) =
+            kinematics.build_joint_limit_constraints(&current_joint_positions, 0.01);
+
+        // Merge equality constraints with joint limit constraints into single vec
+        let mut merged_constraints = constraints.clone();
+        if let (Some(a), Some(res)) = (&limit_a, &limit_residuals) {
+            for row in 0..a.nrows() {
+                if let Some(idx) = a.row(row).iter().position(|&val| val == 1.0) {
+                    merged_constraints.push((idx, res[row]));
+                }
+            }
+        }
+
         // Solve KKT system (handles both constrained and unconstrained cases)
         let (updated_joint_positions, _lagrange_multipliers) = solve_kkt_with_constraints(
             &jacobian,
             &twist,
-            if constraints.is_empty() {
+            if merged_constraints.is_empty() {
                 None
             } else {
-                Some(&constraints)
+                Some(&merged_constraints)
             },
             &current_joint_positions,
             config.damping_factor,
@@ -282,5 +372,107 @@ mod tests {
             Vector3::new(-1.0, 4.0, 0.5).into(),
             UnitQuaternion::from_scaled_axis(Vector3::x() * (std::f64::consts::PI - 1e-4)),
         ));
+    }
+
+    #[test]
+    fn joint_limits_extraction() {
+        use crate::configs::SolverConfig;
+
+        let solver_config = SolverConfig {
+            allowable_target_distance: 0.01,
+            allowable_target_angle: 0.01,
+            jacobian_multiplier: 0.5,
+            num_max_try: 100,
+        };
+
+        let kinematics = Kinematics::build(
+            "assets/rox_diff_ur5e.urdf",
+            "ur5ewrist_3_joint",
+            &solver_config,
+        )
+        .expect("failed to build kinematics");
+
+        let (lower, upper) = kinematics.get_joint_limits();
+        let joint_count = kinematics.serial_chain.iter_joints().count();
+
+        assert_eq!(lower.len(), joint_count);
+        assert_eq!(upper.len(), joint_count);
+
+        for i in 0..joint_count {
+            assert!(
+                lower[i] <= upper[i],
+                "invalid limits at joint {}: lower={} > upper={}",
+                i,
+                lower[i],
+                upper[i]
+            );
+        }
+    }
+
+    #[test]
+    fn build_joint_limit_constraints() {
+        use crate::configs::SolverConfig;
+
+        let solver_config = SolverConfig {
+            allowable_target_distance: 0.01,
+            allowable_target_angle: 0.01,
+            jacobian_multiplier: 0.5,
+            num_max_try: 100,
+        };
+
+        let kinematics = Kinematics::build(
+            "assets/rox_diff_ur5e.urdf",
+            "ur5ewrist_3_joint",
+            &solver_config,
+        )
+        .expect("failed to build kinematics");
+
+        let (lower, upper) = kinematics.get_joint_limits();
+        let n = lower.len();
+
+        // Test 1: No active constraints when joints are far from limits
+        let positions_far = k::nalgebra::DVector::from_vec(vec![0.0; n]);
+        let (a, res) = kinematics.build_joint_limit_constraints(&positions_far, 0.01);
+        assert!(a.is_none(), "no constraints when far from limits");
+        assert!(res.is_none(), "no residuals when no constraints");
+
+        // Test 2: Active constraint at upper limit
+        let mut positions_at_upper = k::nalgebra::DVector::from_vec(vec![0.0; n]);
+        if upper[0].is_finite() {
+            positions_at_upper[0] = upper[0]; // Exactly at upper limit
+            let (a, res) = kinematics.build_joint_limit_constraints(&positions_at_upper, 0.01);
+            assert!(a.is_some(), "constraint created at upper limit");
+            let a = a.unwrap();
+            assert_eq!(a.nrows(), 1, "one active constraint");
+            assert_eq!(a.ncols(), n);
+            assert_eq!(a[(0, 0)], 1.0, "A matrix has 1.0 at constrained joint");
+            assert!((res.unwrap()[0]) < 1e-10, "residual near zero at limit");
+        }
+
+        // Test 3: Active constraint at lower limit
+        let mut positions_at_lower = k::nalgebra::DVector::from_vec(vec![0.0; n]);
+        if lower[1].is_finite() {
+            positions_at_lower[1] = lower[1]; // Exactly at lower limit
+            let (a, _res) = kinematics.build_joint_limit_constraints(&positions_at_lower, 0.01);
+            assert!(a.is_some(), "constraint created at lower limit");
+            let a = a.unwrap();
+            assert_eq!(a.nrows(), 1, "one active constraint");
+            assert_eq!(a[(0, 1)], 1.0, "A matrix has 1.0 at constrained joint");
+        }
+
+        // Test 4: Multiple active constraints (within tolerance)
+        let mut positions_multi = k::nalgebra::DVector::from_vec(vec![0.0; n]);
+        let mut expected_count = 0;
+        for i in 0..n {
+            if upper[i].is_finite() && (upper[i] - positions_multi[i]).abs() <= 0.1 {
+                positions_multi[i] = upper[i] - 0.005; // Within tolerance of upper
+                expected_count += 1;
+            }
+        }
+        let (a, _res) = kinematics.build_joint_limit_constraints(&positions_multi, 0.01);
+        if expected_count > 0 {
+            assert!(a.is_some(), "constraints created for multiple joints");
+            assert_eq!(a.as_ref().unwrap().nrows(), expected_count);
+        }
     }
 }
