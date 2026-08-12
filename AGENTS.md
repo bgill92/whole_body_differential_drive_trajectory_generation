@@ -1,5 +1,13 @@
 # Project Conventions
 
+## Rust Style
+
+Generic Rust best practices (error handling with `Result`, enums for closed
+sets, API and testing idioms) live in
+[docs/rust-best-practices.md](docs/rust-best-practices.md). Follow them for
+all Rust code in this repo; the project-specific rules below take precedence
+where they overlap.
+
 ## Rust Edition
 
 **Use edition = "2024" in Cargo.toml** - This is the latest stable Rust edition. Do not change to 2021 or other editions without explicit request.

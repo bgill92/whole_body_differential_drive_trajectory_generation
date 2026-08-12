@@ -1,0 +1,95 @@
+# Rust Best Practices
+
+Generic Rust guidance, independent of this project. Project-specific
+conventions (crate layout, re-exports, workflow) live in `AGENTS.md` and take
+precedence. Baseline beyond this doc: [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
+and idioms enforced by `clippy`.
+
+## Error Handling
+
+- Return `Result<T, E>` for anything that can fail at runtime (I/O, parsing,
+  singular matrices, bad user input). Propagate with `?`.
+- No `unwrap()`/`expect()` on fallible operations in library code. A failed
+  LU solve, file read, or lookup is an `Err`, not a panic.
+- `expect("...")` is acceptable only for invariants the surrounding code makes
+  impossible to violate — and the message must state the invariant, e.g.
+  `accepted.expect("active-set loop solves at least once")`. Reads as
+  documentation; panics only on a bug.
+- `panic!`/`assert!` are for programmer errors (violated preconditions), never
+  for expected failure paths.
+- Small crates: `Result<T, String>` is fine. Graduate to a dedicated error
+  enum (`thiserror`) once callers need to match on failure kinds — not before.
+- `Option<T>` models absence; don't overload sentinel values (`-1`, `NaN`,
+  empty string) to mean "missing". Exception: interop boundaries where the
+  format demands it (e.g. `±inf` for unbounded joint limits) — document it.
+
+## Type Design
+
+- Make invalid states unrepresentable. A closed set of alternatives is an
+  `enum`, not a string, bool flag, or integer code — the compiler then forces
+  every `match` to handle all cases.
+- Related values travel together as a `struct` with named fields, not a tuple.
+  `Constraint { joint_index, target, kind }` cannot be mixed up;
+  `(usize, f64)` can silently mean two different things at two call sites.
+- Prefer `match` over `if`-chains when branching on an enum; exhaustiveness
+  checking catches the variant you forgot when a new one is added. Avoid
+  `_ =>` catch-alls for the same reason.
+- Derive liberally: `Debug` almost always; `Clone`/`Copy` for small plain
+  data; `PartialEq` where tests compare values.
+- Newtype wrappers (`struct Meters(f64)`) when mixing up two same-typed
+  quantities would be a real bug and the call sites are numerous.
+
+## Functions and APIs
+
+- Accept borrows, return owned: parameters as `&[T]`, `&str`, `&T`; return
+  `Vec<T>`, `String`, `T`. Let the caller decide about ownership.
+- Magic numbers become named `const`s with a doc comment
+  (`const LIMIT_TOLERANCE: f64 = 0.01;`), at the narrowest scope that all
+  users share.
+- A function does one job. If a loop body needs its own explanatory comment
+  block, it probably wants to be a named function whose doc comment is that
+  block.
+- Keep items private by default. `pub` is a commitment; add it when something
+  outside the module actually needs the item, remove it when nothing does.
+- `impl` blocks hold behavior that needs `self`; free functions are fine for
+  operations on borrowed data with no state.
+
+## Control Flow and Iteration
+
+- Iterator chains (`iter().map().collect()`, `position`, `any`, `find`) over
+  hand-rolled loops when they read clearer. Index loops remain idiomatic for
+  numeric/matrix code where indices are the domain (aligned vectors, matrix
+  rows).
+- `if let Some(x) = ...` for a single interesting case; `match` once there are
+  two.
+- Early `return`/`continue`/`break` over nested conditionals. Guard clauses
+  first, happy path unindented.
+
+## Documentation and Comments
+
+- `///` doc comments on every public item: what it does, units/conventions,
+  error conditions. First line is a standalone summary sentence.
+- Comments explain WHY — the sign convention, the numerical edge case, the
+  invariant — never restate WHAT the next line does.
+- Document deviations from the obvious (e.g. why a Taylor series replaces the
+  closed form near a singularity) at the point of deviation.
+
+## Testing
+
+- Unit tests in `#[cfg(test)] mod tests` at the bottom of the module under
+  test, using `use super::*`.
+- Extract repeated setup into plain helper functions inside the test module —
+  no framework fixtures needed.
+- Assert with messages that print the offending values:
+  `assert!(x < limit, "joint {} out of limits: {}", i, x)`. A bare failed
+  `assert!` tells you nothing.
+- Test behavior through the public API (a trajectory stays within limits),
+  not implementation details (which rows the working set held).
+
+## Tooling
+
+- `cargo fmt` before finishing; never hand-format.
+- `cargo clippy --all-targets` and take its advice; allow-list with a
+  `#[allow]` + reason only when the lint is genuinely wrong.
+- `cargo check --all-targets` so `#[cfg(test)]` code compiles too.
+- Keep the build warning-clean; a new warning is a defect, not noise.
