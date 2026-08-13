@@ -1,10 +1,18 @@
 urdf_path: assets/rox_diff_ur5e.urdf
 end_joint: ur5ewrist_3_joint
 
-# Goal pose in the world frame. rpy is roll-pitch-yaw in radians.
-goal:
-  xyz: [1.0, 1.0, 1.0]
-  rpy: [3.14159265358979, 0.0, 0.0]
+# Waypoint poses in the world frame, linearly interpolated (translation lerp,
+# rotation slerp) into poses_per_segment poses per segment. rpy is
+# roll-pitch-yaw in radians.
+path:
+  poses_per_segment: 10
+  # Debug: only solve the first pose of the interpolated path.
+  solve_first_pose_only: true
+  waypoints:
+    - xyz: [1.0, 1.0, 1.0]
+      rpy: [3.14159265358979, 0.0, 0.0]
+    - xyz: [1.0, -1.0, 1.0]
+      rpy: [3.14159265358979, 0.0, 0.0]
 
 # Differential IK loop.
 differential_ik:

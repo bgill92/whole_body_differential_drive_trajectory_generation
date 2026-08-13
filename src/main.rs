@@ -18,9 +18,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut kinematics = Kinematics::build(urdf_path, &config.end_joint).unwrap();
 
-    let goal = config.goal.to_isometry();
+    let mut goal_poses = config.path.interpolate();
 
-    // println!("Jacobian: {}", k::jacobian(&kinematics.serial_chain));
+    // Full interpolated path as a translucent green line, logged before the
+    // debug truncation so the whole path stays visible.
+    let path_points: Vec<[f32; 3]> = goal_poses
+        .iter()
+        .map(|p| {
+            let t = p.translation.vector.cast::<f32>();
+            [t.x, t.y, t.z]
+        })
+        .collect();
+    // Pin the line to the world frame; without a CoordinateFrame the entity
+    // cannot be resolved once the URDF frame graph starts animating.
+    rec.log_static("path_line", &rerun::CoordinateFrame::new("world"))?;
+    rec.log_static(
+        "path_line",
+        &rerun::LineStrips3D::new([path_points])
+            .with_colors([rerun::Color::from_unmultiplied_rgba(0, 255, 0, 100)]),
+    )?;
 
     rec.log_file_from_path(urdf_path, None, true)?;
 
@@ -35,30 +51,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rec.log_static(path, &rerun::TransformAxes3D::new(0.1))?;
     }
 
-    // 1. Define where "goal_frame" sits, relative to an existing frame.
-    let goal_translation = goal.translation.vector.cast::<f32>();
-    let goal_quaternion = goal.rotation.as_vector().cast::<f32>();
-    rec.log_static(
-        "goal_transform",
-        &rerun::Transform3D::new()
-            .with_translation([goal_translation.x, goal_translation.y, goal_translation.z])
-            // nalgebra stores the quaternion coefficients as [x, y, z, w], the
-            // order rerun wants.
-            .with_quaternion(rerun::Quaternion::from_xyzw([
-                goal_quaternion[0],
-                goal_quaternion[1],
-                goal_quaternion[2],
-                goal_quaternion[3],
-            ]))
-            .with_parent_frame("world") // must match a real URDF frame
-            .with_child_frame("goal_frame"),
-    )?;
+    for (i, goal) in goal_poses.iter().enumerate() {
+        // 1. Define where the goal frame sits, relative to an existing frame.
+        let goal_translation = goal.translation.vector.cast::<f32>();
+        let goal_quaternion = goal.rotation.as_vector().cast::<f32>();
+        let frame = format!("goal_frame_{i}");
+        rec.log_static(
+            format!("goal_transform_{i}"),
+            &rerun::Transform3D::new()
+                .with_translation([goal_translation.x, goal_translation.y, goal_translation.z])
+                // nalgebra stores the quaternion coefficients as [x, y, z, w],
+                // the order rerun wants.
+                .with_quaternion(rerun::Quaternion::from_xyzw([
+                    goal_quaternion[0],
+                    goal_quaternion[1],
+                    goal_quaternion[2],
+                    goal_quaternion[3],
+                ]))
+                .with_parent_frame("world") // must match a real URDF frame
+                .with_child_frame(frame.as_str()),
+        )?;
 
-    // 2. Draw axes at that frame — identical to the link loop.
-    rec.log_static("axes/goal", &rerun::CoordinateFrame::new("goal_frame"))?;
-    rec.log_static("axes/goal", &rerun::TransformAxes3D::new(0.1))?;
+        // 2. Draw axes at that frame — identical to the link loop.
+        let path = format!("axes/goal_{i}");
+        rec.log_static(path.as_str(), &rerun::CoordinateFrame::new(frame))?;
+        rec.log_static(path, &rerun::TransformAxes3D::new(0.1))?;
+    }
 
-    let joint_positions = differential_ik(&goal, &mut kinematics, &config.differential_ik)?;
+    // Truncate only for solving — every pose above is still visualized.
+    if config.path.solve_first_pose_only {
+        goal_poses.truncate(1);
+    }
+
+    let mut joint_positions = Vec::new();
+    for goal in &goal_poses {
+        joint_positions.extend(differential_ik(goal, &mut kinematics, &config.differential_ik)?);
+    }
 
     let names = kinematics.joint_names();
 
@@ -72,14 +100,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rec.log("/transforms", &joint_transform)?;
         }
     }
-    // rec.set_time_sequence("step", 0);
-    // for (name, position) in names.iter().zip(&positions) {
-    //     let joint = urdf
-    //         .get_joint_by_name(name)
-    //         .ok_or_else(|| format!("no urdf joint named {name}"))?;
-    //     let joint_transform = urdf.compute_joint_transform(joint, *position, false)?;
-    //     // rec.log("/transforms", &joint_transform)?;
-    // }
 
     Ok(())
 }
