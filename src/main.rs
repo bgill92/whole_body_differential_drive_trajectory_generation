@@ -4,7 +4,7 @@ use rerun::external::re_importer::UrdfTree;
 
 use rerun::external::re_log;
 
-use wbdd::{Config, Kinematics, differential_ik};
+use wbdd::{Config, EqualityConstraint, Kinematics, differential_ik};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     re_log::setup_logging();
@@ -28,6 +28,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     visualization::log_path_line(&rec, &goal_poses)?;
     visualization::log_goal_axes(&rec, &goal_poses)?;
 
+    // Seed the differential-drive base facing the direction of travel: pin the
+    // planar yaw joint so the base x-axis is parallel to the first path
+    // segment, for the first pose only.
+    if config.path.align_first_pose_base_yaw && goal_poses.len() > 1 {
+        let direction = goal_poses[1].translation.vector - goal_poses[0].translation.vector;
+        config
+            .differential_ik
+            .equality_constraints
+            .push(EqualityConstraint {
+                joint_name: "world_base_link_planar_yaw".to_string(),
+                target_value: direction.y.atan2(direction.x),
+            });
+    }
+
     // Keep only the converged configuration per pose; the trajectory is never
     // empty (it starts with the seed configuration). Each solve seeds from the
     // previous one — `kinematics` keeps its joint positions between calls.
@@ -37,8 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
     ];
 
-    // Equality constraints apply only to the first pose; subsequent solves run
-    // unconstrained.
+    // Equality constraints (config + yaw pin) apply only to the first pose;
+    // subsequent solves run unconstrained.
     config.differential_ik.equality_constraints.clear();
 
     // Remaining poses skipped when debugging the first pose — still visualized.

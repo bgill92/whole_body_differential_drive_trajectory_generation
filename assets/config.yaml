@@ -8,6 +8,8 @@ path:
   poses_per_segment: 10
   # Debug: only solve the first pose of the interpolated path.
   solve_first_pose_only: false
+  # Pin base yaw for the first pose so the base x-axis points along the path.
+  align_first_pose_base_yaw: true
   waypoints:
     - xyz: [1.0, 1.0, 1.0]
       rpy: [3.14159265358979, 0.0, 0.0]

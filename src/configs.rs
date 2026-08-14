@@ -36,6 +36,11 @@ pub struct PathConfig {
     /// Debug: solve only the first pose of the interpolated path.
     #[serde(default)]
     pub solve_first_pose_only: bool,
+    /// Pin the base yaw joint for the first pose so the base x-axis points
+    /// along the path direction (first pose toward second interpolated pose).
+    /// Seeds the differential-drive base facing the direction of travel.
+    #[serde(default)]
+    pub align_first_pose_base_yaw: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -105,8 +110,9 @@ differential_ik:
         let (roll, pitch, yaw) = goal.rotation.euler_angles();
         assert!((roll.abs() - std::f64::consts::PI).abs() < 1e-9);
         assert!(pitch.abs() < 1e-9 && yaw.abs() < 1e-9);
-        // Debug flag defaults to off when absent from the YAML.
+        // Optional flags default to off when absent from the YAML.
         assert!(!config.path.solve_first_pose_only);
+        assert!(!config.path.align_first_pose_base_yaw);
     }
 
     #[test]
