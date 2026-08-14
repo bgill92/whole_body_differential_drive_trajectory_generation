@@ -40,5 +40,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     visualization::log_trajectory(&rec, &urdf, &kinematics.joint_names(), &joint_positions)?;
 
+    // Block until everything (including the ~50 MiB of URDF meshes) reaches the
+    // viewer — dropping the stream on exit silently discards unsent data.
+    rec.flush_blocking();
+
     Ok(())
 }
