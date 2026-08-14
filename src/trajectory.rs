@@ -368,6 +368,11 @@ pub fn optimize(
     let mut trust_region = config.trust_region;
     let mut current_merit = merit(&knots, goal_poses, kinematics, config, &base);
     let mut converged = false;
+    // Distinguishes why the loop ended, for the non-convergence message
+    // below: exhausting sqp_max_iterations is a different situation from the
+    // trust region collapsing (a merit-local point the quadratic model can't
+    // improve on at any radius). Some(iteration) records where it stalled.
+    let mut stalled: Option<usize> = None;
     for iteration in 0..config.sqp_max_iterations {
         // Equality-relaxation retry loop, used in both modes: shrink the
         // demanded correction (not the trust region — shrinking the box
@@ -379,6 +384,9 @@ pub fn optimize(
         let mut alpha = 1.0;
         let mut step = None;
         let mut last_error = String::new();
+        // ponytail: rejected iterations redo per-knot FK/Jacobians for
+        // unchanged knots; cache them per outer iteration if profiling ever
+        // cares.
         for _ in 0..=4 {
             match sqp_step(
                 &knots,
@@ -428,8 +436,11 @@ pub fn optimize(
         // actually improve the ℓ1 exact-penalty merit — and shrinking the
         // trust region when they don't — turns this into a real
         // trust-region method instead of a fixed-step Gauss-Newton iteration.
+        // Relative margin: 1e-12 absolute is below f64 ULP at hard-mode merit
+        // magnitudes (~1e4 from the exact-penalty terms), so an absolute
+        // threshold would spuriously accept non-improving steps there.
         let candidate_merit = merit(&candidate, goal_poses, kinematics, config, &base);
-        if candidate_merit <= current_merit - 1e-12 {
+        if candidate_merit <= current_merit - 1e-12 * current_merit.max(1.0) {
             knots = candidate;
             current_merit = candidate_merit;
             trust_region = (2.0 * trust_region).min(config.trust_region);
@@ -440,10 +451,18 @@ pub fn optimize(
                 break;
             }
         } else {
+            // A full-target step the merit can't improve on is a fixed
+            // point, not a stall: check convergence before shrinking, or a
+            // legitimately converged iterate gets misreported as stalled.
+            if alpha >= 1.0 && step_norm < config.convergence_step_norm {
+                converged = true;
+                break;
+            }
             // Rejected: the quadratic model over-promised at this radius.
             trust_region *= 0.5;
             if trust_region < config.trust_region / 64.0 {
-                break; // stalled at a merit-local point; non-convergence warning below fires
+                stalled = Some(iteration);
+                break;
             }
         }
     }
@@ -451,11 +470,20 @@ pub fn optimize(
     if !converged {
         // The spec promises a stderr signal for best-effort returns; hard
         // mode can finish on a relaxed step with EE targets only partially
-        // met, so silence here would hide real tracking error.
-        eprintln!(
-            "trajectory optimization did not converge within {} iterations; returning last iterate",
-            config.sqp_max_iterations
-        );
+        // met, so silence here would hide real tracking error. Distinguish
+        // why: exhausting the iteration budget is fixable by raising
+        // sqp_max_iterations, while a collapsed trust region means the
+        // merit landscape itself is stuck at this radius floor.
+        match stalled {
+            Some(iteration) => eprintln!(
+                "trajectory optimization: trust region collapsed after {} iterations; returning last iterate",
+                iteration + 1
+            ),
+            None => eprintln!(
+                "trajectory optimization did not converge within {} iterations; returning last iterate",
+                config.sqp_max_iterations
+            ),
+        }
     }
 
     // The progressive velocity budget only guarantees the configured limit

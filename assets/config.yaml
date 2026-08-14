@@ -15,6 +15,8 @@ path:
       rpy: [3.14159265358979, 0.0, 0.0]
     - xyz: [1.0, -1.0, 1.0]
       rpy: [3.14159265358979, 0.0, 0.0]
+    - xyz: [-1.0, -1.0, 1.0]
+      rpy: [3.14159265358979, 0.0, 0.0]
 
 # Differential IK loop.
 differential_ik:
@@ -39,7 +41,7 @@ trajectory:
   ee_weight: 100.0
   smoothness_weight: 1.0
   max_joint_velocity: 1.0
-  sqp_max_iterations: 20
+  sqp_max_iterations: 50
   trust_region: 0.2
   convergence_step_norm: 1.0e-4
   damping: 1.0e-3
