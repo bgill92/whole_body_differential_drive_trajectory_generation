@@ -21,7 +21,8 @@ pub struct DifferentialIkConfig {
     pub num_steps: usize,
     pub damping_factor: f64,
     pub convergence_threshold: f64,
-    /// Optional equality constraints: joints forced to specific values each iteration
+    /// Optional equality constraints: joints forced to specific values each
+    /// iteration. Applied to the first pose solve only (see main.rs).
     #[serde(default)]
     pub equality_constraints: Vec<EqualityConstraint>,
 }

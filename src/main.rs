@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "assets/config.yaml".to_string());
-    let config: Config = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let mut config: Config = serde_yaml_ng::from_str(&std::fs::read_to_string(&config_path)?)?;
 
     let urdf_path = config.urdf_path.as_str();
 
@@ -22,20 +22,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let urdf = UrdfTree::from_file_path(urdf_path, None)?;
 
-    let mut goal_poses = config.path.interpolate();
+    let goal_poses = config.path.interpolate();
 
     visualization::log_urdf(&rec, urdf_path, &urdf)?;
     visualization::log_path_line(&rec, &goal_poses)?;
     visualization::log_goal_axes(&rec, &goal_poses)?;
 
-    // Truncate only for solving — every pose above is still visualized.
-    if config.path.solve_first_pose_only {
-        goal_poses.truncate(1);
-    }
+    // Keep only the converged configuration per pose; the trajectory is never
+    // empty (it starts with the seed configuration). Each solve seeds from the
+    // previous one — `kinematics` keeps its joint positions between calls.
+    let mut joint_positions = vec![
+        differential_ik(&goal_poses[0], &mut kinematics, &config.differential_ik)?
+            .pop()
+            .unwrap(),
+    ];
 
-    let mut joint_positions = Vec::new();
-    for goal in &goal_poses {
-        joint_positions.extend(differential_ik(goal, &mut kinematics, &config.differential_ik)?);
+    // Equality constraints apply only to the first pose; subsequent solves run
+    // unconstrained.
+    config.differential_ik.equality_constraints.clear();
+
+    // Remaining poses skipped when debugging the first pose — still visualized.
+    if !config.path.solve_first_pose_only {
+        for goal in &goal_poses[1..] {
+            joint_positions.push(
+                differential_ik(goal, &mut kinematics, &config.differential_ik)?
+                    .pop()
+                    .unwrap(),
+            );
+        }
     }
 
     visualization::log_trajectory(&rec, &urdf, &kinematics.joint_names(), &joint_positions)?;
