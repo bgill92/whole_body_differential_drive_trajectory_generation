@@ -96,9 +96,13 @@ fn sqp_step(
     base: &BaseIndices,
     lower: &DVec,
     upper: &DVec,
-    // Trust-region radius for this attempt; varies under backoff, so it is
-    // passed separately from `config.trust_region` (the starting radius).
-    trust_region: f64,
+    // Relaxes the linearized hard-mode EE targets (JΔ = α·r instead of
+    // JΔ = r): when the full target conflicts with the trust region or
+    // velocity rows, shrinking α enlarges the feasible set by asking for
+    // less EE correction this iteration, rather than shrinking the box
+    // (which only ever shrinks the feasible set and can never rescue an
+    // infeasible subproblem). Unused in soft mode.
+    hard_target_scale: f64,
 ) -> Result<DVec, String> {
     let num_knots = knots.len();
     let n = lower.len();
@@ -185,7 +189,7 @@ fn sqp_step(
             a_eq.slice_mut((row0, k * n), (6, n))
                 .copy_from(&jacobians[k]);
             for axis in 0..6 {
-                b_eq[row0 + axis] = residuals[k][axis];
+                b_eq[row0 + axis] = hard_target_scale * residuals[k][axis];
             }
         }
     }
@@ -216,8 +220,8 @@ fn sqp_step(
     let mut ub = DVec::zeros(dim);
     for k in 0..num_knots {
         for j in 0..n {
-            lb[k * n + j] = (lower[j] - knots[k][j]).max(-trust_region);
-            ub[k * n + j] = (upper[j] - knots[k][j]).min(trust_region);
+            lb[k * n + j] = (lower[j] - knots[k][j]).max(-config.trust_region);
+            ub[k * n + j] = (upper[j] - knots[k][j]).min(config.trust_region);
         }
     }
 
@@ -254,52 +258,74 @@ pub fn optimize(
     if config.dt <= 0.0 || config.trust_region <= 0.0 || config.damping <= 0.0 {
         return Err("trajectory dt, trust_region, and damping must be > 0".to_string());
     }
+    // Negative weights make P indefinite (JᵀJ and the smoothness Laplacian
+    // are only guaranteed PSD with a nonnegative coefficient); a nonpositive
+    // velocity budget makes every interval's inequality rows infeasible.
+    if config.ee_weight < 0.0 || config.smoothness_weight < 0.0 {
+        return Err("trajectory ee_weight and smoothness_weight must be >= 0".to_string());
+    }
+    if config.max_joint_velocity <= 0.0 {
+        return Err("trajectory max_joint_velocity must be > 0".to_string());
+    }
     let base = resolve_base_indices(&joint_names, &config.base_joint_names)?;
     let (lower, upper) = kinematics.joint_limits();
 
     let mut knots: Vec<DVec> = warm_start
         .iter()
-        .map(|knot| DVec::from_vec(knot.clone()))
+        .map(|knot| {
+            // An out-of-limits warm start would make the box lb > ub for
+            // that variable, surfacing as an opaque QP infeasibility rather
+            // than the actual cause.
+            let mut positions = DVec::from_vec(knot.clone());
+            for j in 0..n {
+                positions[j] = positions[j].clamp(lower[j], upper[j]);
+            }
+            positions
+        })
         .collect();
 
     for iteration in 0..config.sqp_max_iterations {
-        // Trust-region backoff: near kinematic singularities the linearized
-        // hard-mode rows can be inconsistent at full step scale; shrinking
-        // the region re-centers the linearization until the subproblem is
-        // solvable. Four halvings spans a 16x range — beyond that the
-        // iterate is genuinely stuck and the error is real.
-        let mut trust_region = config.trust_region;
-        let mut step = None;
-        let mut last_error = String::new();
-        for _ in 0..=4 {
-            match sqp_step(
-                &knots,
-                goal_poses,
-                kinematics,
-                config,
-                &base,
-                &lower,
-                &upper,
-                trust_region,
-            ) {
-                Ok(s) => {
-                    step = Some(s);
-                    break;
-                }
-                Err(e) => {
-                    last_error = e;
-                    trust_region *= 0.5;
+        // Hard mode only: relax the linearized EE equality targets
+        // (JΔ = α·r instead of JΔ = r) when the full-target subproblem is
+        // infeasible, e.g. near a kinematic singularity or a tight velocity
+        // budget. Shrinking the trust region instead (the previous approach)
+        // only ever shrinks the feasible set and can never rescue an
+        // infeasible subproblem; relaxing the target enlarges it. Soft mode
+        // has no equality EE rows, so retrying would repeat the identical
+        // subproblem — call once and propagate any error directly. Four
+        // halvings spans a 16x range — beyond that the iterate is genuinely
+        // stuck and the error is real.
+        let (step, relaxed) = if matches!(config.ee_tracking, EeTracking::Hard) {
+            let mut alpha = 1.0;
+            let mut step = None;
+            let mut last_error = String::new();
+            for _ in 0..=4 {
+                match sqp_step(
+                    &knots, goal_poses, kinematics, config, &base, &lower, &upper, alpha,
+                ) {
+                    Ok(s) => {
+                        step = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        last_error = e;
+                        alpha *= 0.5;
+                    }
                 }
             }
-        }
-        let step = step.ok_or_else(|| {
-            let hint = if matches!(config.ee_tracking, EeTracking::Hard) {
-                "; ee_tracking: hard can conflict with base kinematics — try soft"
-            } else {
-                ""
-            };
-            format!("sqp iteration {iteration}: {last_error}{hint}")
-        })?;
+            let step = step.ok_or_else(|| {
+                format!(
+                    "sqp iteration {iteration}: {last_error}; ee_tracking: hard can conflict with base kinematics — try soft"
+                )
+            })?;
+            (step, alpha < 1.0)
+        } else {
+            let step = sqp_step(
+                &knots, goal_poses, kinematics, config, &base, &lower, &upper, 1.0,
+            )
+            .map_err(|e| format!("sqp iteration {iteration}: {e}"))?;
+            (step, false)
+        };
 
         let mut step_norm: f64 = 0.0;
         for k in 0..knots.len() {
@@ -311,7 +337,9 @@ pub fn optimize(
                 knots[k][j] = (knots[k][j] + delta).clamp(lower[j], upper[j]);
             }
         }
-        if step_norm < config.convergence_step_norm {
+        // A relaxed-target step can be small without meaning converged: it
+        // only satisfied a scaled-down EE target, not the real one.
+        if !relaxed && step_norm < config.convergence_step_norm {
             break;
         }
     }
@@ -502,6 +530,25 @@ mod tests {
             mean_ee_error < 0.25,
             "mean EE tracking error too large: {mean_ee_error}"
         );
+
+        // Smoothness sign: a flipped linear term would bias the SQP toward
+        // *larger* consecutive differences instead of penalizing them, so
+        // the optimized trajectory must not be less smooth than warm start.
+        let sum_sq_diff = |trajectory: &[Vec<f64>]| -> f64 {
+            (0..trajectory.len() - 1)
+                .map(|k| {
+                    (0..n)
+                        .map(|j| (trajectory[k + 1][j] - trajectory[k][j]).powi(2))
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let warm_start_smoothness = sum_sq_diff(&start);
+        let optimized_smoothness = sum_sq_diff(&optimized);
+        assert!(
+            optimized_smoothness <= warm_start_smoothness + 1e-9,
+            "optimized trajectory less smooth than warm start: {optimized_smoothness} > {warm_start_smoothness}"
+        );
     }
 
     // (d) Hard mode on a reachable straight path solves and also kills slip.
@@ -517,6 +564,17 @@ mod tests {
         for k in 0..optimized.len() - 1 {
             let (residual, _) = nonholonomic_linearization(&optimized[k], &optimized[k + 1], &base);
             assert!(residual.abs() < 1e-6, "slip {residual} at interval {k}");
+        }
+        // Hard-row sign: JΔ = r (not -r) must drive the EE pose to the goal,
+        // not away from it.
+        for (k, knot) in optimized.iter().enumerate() {
+            kinematics.set_positions(knot);
+            let twist = pose_error_twist(&goals[k].to_homogeneous(), &kinematics.end_pose());
+            assert!(
+                twist.norm() < 0.05,
+                "hard-mode EE error {} too large at knot {k}",
+                twist.norm()
+            );
         }
     }
 

@@ -166,7 +166,7 @@ fn resolve_equality_constraints(
     Ok((a_eq, targets))
 }
 
-/// Body twist [v; omega] taking `current_pose` to `goal_pose`.
+/// Spatial twist [v; omega] taking `current_pose` to `goal_pose`.
 pub(crate) fn pose_error_twist(
     goal_pose: &k::nalgebra::Matrix4<f64>,
     current_pose: &k::Isometry3<f64>,
