@@ -284,6 +284,7 @@ pub fn optimize(
         })
         .collect();
 
+    let mut converged = false;
     for iteration in 0..config.sqp_max_iterations {
         // Hard mode only: relax the linearized EE equality targets
         // (JΔ = α·r instead of JΔ = r) when the full-target subproblem is
@@ -340,8 +341,19 @@ pub fn optimize(
         // A relaxed-target step can be small without meaning converged: it
         // only satisfied a scaled-down EE target, not the real one.
         if !relaxed && step_norm < config.convergence_step_norm {
+            converged = true;
             break;
         }
+    }
+
+    if !converged {
+        // The spec promises a stderr signal for best-effort returns; hard
+        // mode can finish on a relaxed step with EE targets only partially
+        // met, so silence here would hide real tracking error.
+        eprintln!(
+            "trajectory optimization did not converge within {} iterations; returning last iterate",
+            config.sqp_max_iterations
+        );
     }
 
     Ok(knots

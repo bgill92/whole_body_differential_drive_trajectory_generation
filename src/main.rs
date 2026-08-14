@@ -68,18 +68,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Whole-trajectory SQP pass, warm-started from the sequential IK result.
     // Skipped in first-pose debug mode: the optimizer needs every knot.
-    if let Some(trajectory_config) = &config.trajectory {
-        if trajectory_config.enabled {
-            if config.path.solve_first_pose_only {
-                eprintln!("trajectory optimization skipped: path.solve_first_pose_only is set");
-            } else {
-                joint_positions = trajectory::optimize(
-                    &goal_poses,
-                    &mut kinematics,
-                    trajectory_config,
-                    &joint_positions,
-                )?;
-            }
+    if let Some(trajectory_config) = &config.trajectory
+        && trajectory_config.enabled
+    {
+        if config.path.solve_first_pose_only {
+            eprintln!("trajectory optimization skipped: path.solve_first_pose_only is set");
+        } else {
+            joint_positions = trajectory::optimize(
+                &goal_poses,
+                &mut kinematics,
+                trajectory_config,
+                &joint_positions,
+            )?;
         }
     }
 
