@@ -82,6 +82,73 @@ fn resolve_base_indices(
     })
 }
 
+/// ℓ1 exact-penalty merit: tracking + smoothness costs plus a penalty on
+/// nonlinear constraint violation. Used only to accept/reject SQP steps —
+/// the QP itself never sees it.
+// ponytail: fixed penalty weight; exactness needs it above the largest
+// constraint multiplier, upgrade to adaptive nu if a case ever beats 1e4.
+const MERIT_PENALTY: f64 = 1e4;
+
+// The argument list mirrors sqp_step's (same subproblem context); bundling
+// into a struct would obscure it.
+#[allow(clippy::too_many_arguments)]
+fn merit(
+    knots: &[DVec],
+    goal_poses: &[k::Isometry3<f64>],
+    kinematics: &mut Kinematics,
+    config: &TrajectoryConfig,
+    base: &BaseIndices,
+) -> f64 {
+    let num_knots = knots.len();
+    let n = knots[0].len();
+    let hard = matches!(config.ee_tracking, EeTracking::Hard);
+    let velocity_limit = config.max_joint_velocity * config.dt;
+
+    let mut total = 0.0;
+
+    // EE term: a smooth cost in soft mode (it IS the objective there), an
+    // exact-penalty term in hard mode (EE is a constraint there).
+    for (knot, goal) in knots.iter().zip(goal_poses) {
+        kinematics.set_positions(knot.as_slice());
+        let residual = pose_error_twist(&goal.to_homogeneous(), &kinematics.end_pose());
+        if hard {
+            total += MERIT_PENALTY * residual.iter().map(|v| v.abs()).sum::<f64>();
+        } else {
+            total += 0.5 * config.ee_weight * residual.norm_squared();
+        }
+    }
+
+    // Smoothness cost, matching sqp_step's quadratic exactly.
+    for k in 0..num_knots.saturating_sub(1) {
+        let mut sum_sq = 0.0;
+        // Both knots[k] and knots[k + 1] are indexed by j, so an
+        // iterator/enumerate rewrite would not actually simplify this.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let difference = knots[k + 1][j] - knots[k][j];
+            sum_sq += difference * difference;
+        }
+        total += 0.5 * config.smoothness_weight * sum_sq;
+    }
+
+    // Penalty on nonlinear constraint violation: no-slip (always) and joint
+    // velocity limits (always — soft-mode velocity rows are also progressive
+    // there, so the merit must judge against the real limit, not the
+    // step-local budget).
+    for k in 0..num_knots.saturating_sub(1) {
+        let (residual, _) =
+            nonholonomic_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+        total += MERIT_PENALTY * residual.abs();
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let difference = (knots[k + 1][j] - knots[k][j]).abs();
+            total += MERIT_PENALTY * (difference - velocity_limit).max(0.0);
+        }
+    }
+
+    total
+}
+
 /// Assemble and solve one SQP subproblem at the current iterate; returns the
 /// stacked step ΔQ. Cost convention: min ½ΔᵀPΔ + qᵀΔ with P = w_ee·JᵀJ blocks
 /// (soft mode) + smoothness difference operator + damping·I.
@@ -96,13 +163,19 @@ fn sqp_step(
     base: &BaseIndices,
     lower: &DVec,
     upper: &DVec,
-    // Relaxes the linearized hard-mode EE targets (JΔ = α·r instead of
-    // JΔ = r): when the full target conflicts with the trust region or
-    // velocity rows, shrinking α enlarges the feasible set by asking for
-    // less EE correction this iteration, rather than shrinking the box
-    // (which only ever shrinks the feasible set and can never rescue an
-    // infeasible subproblem). Unused in soft mode.
-    hard_target_scale: f64,
+    // Trust-region radius for this attempt; the caller adapts it via the
+    // merit-function accept/reject loop, so it is passed separately from
+    // `config.trust_region` (the starting/maximum radius).
+    trust_region: f64,
+    // Scales every linearized equality rhs toward zero (JΔ = α·target
+    // instead of JΔ = target): nonholonomic no-slip AND, in hard mode, EE
+    // pose rows. Shrinking α asks for less correction per step rather than
+    // the full amount, enlarging the feasible set when the full target
+    // conflicts with the trust region or velocity rows. This is a homotopy,
+    // not a slip license: the SQP fixed point still forces exact constraint
+    // satisfaction, since Δ = 0 solving the QP requires α·c = 0, i.e. c = 0
+    // whenever α ≠ 0.
+    equality_scale: f64,
 ) -> Result<DVec, String> {
     let num_knots = knots.len();
     let n = lower.len();
@@ -181,7 +254,7 @@ fn sqp_step(
         for (offset, value) in partials {
             a_eq[(k, k * n + offset)] = value;
         }
-        b_eq[k] = -residual;
+        b_eq[k] = equality_scale * -residual;
     }
     if hard {
         for k in 0..num_knots {
@@ -189,20 +262,26 @@ fn sqp_step(
             a_eq.slice_mut((row0, k * n), (6, n))
                 .copy_from(&jacobians[k]);
             for axis in 0..6 {
-                b_eq[row0 + axis] = hard_target_scale * residuals[k][axis];
+                b_eq[row0 + axis] = equality_scale * residuals[k][axis];
             }
         }
     }
 
     // Velocity limits: |d_k + (Δ_{k+1} − Δ_k)| ≤ v_max·dt, two rows per joint
     // per interval over ΔQ.
-    let budget = config.max_joint_velocity * config.dt;
+    let hard_budget = config.max_joint_velocity * config.dt;
     let m_in = 2 * n * num_intervals;
     let mut a_in = DMat::zeros(m_in, dim);
     let mut b_in = DVec::zeros(m_in);
     for k in 0..num_intervals {
         for j in 0..n {
             let difference = knots[k + 1][j] - knots[k][j];
+            // Where the current iterate already violates the velocity limit
+            // by more than one trust-region step, tighten progressively
+            // (one trust-region step per SQP iteration) instead of handing
+            // Clarabel an empty feasible set; the configured limit is
+            // enforced wherever it is reachable this iteration.
+            let budget = (difference.abs() - trust_region).max(hard_budget);
             let upper_row = 2 * (k * n + j);
             a_in[(upper_row, (k + 1) * n + j)] = 1.0;
             a_in[(upper_row, k * n + j)] = -1.0;
@@ -220,8 +299,8 @@ fn sqp_step(
     let mut ub = DVec::zeros(dim);
     for k in 0..num_knots {
         for j in 0..n {
-            lb[k * n + j] = (lower[j] - knots[k][j]).max(-config.trust_region);
-            ub[k * n + j] = (upper[j] - knots[k][j]).min(config.trust_region);
+            lb[k * n + j] = (lower[j] - knots[k][j]).max(-trust_region);
+            ub[k * n + j] = (upper[j] - knots[k][j]).min(trust_region);
         }
     }
 
@@ -284,65 +363,88 @@ pub fn optimize(
         })
         .collect();
 
+    // Trust-region radius, adapted by the merit accept/reject loop below:
+    // grows toward the configured value on acceptance, shrinks on rejection.
+    let mut trust_region = config.trust_region;
+    let mut current_merit = merit(&knots, goal_poses, kinematics, config, &base);
     let mut converged = false;
     for iteration in 0..config.sqp_max_iterations {
-        // Hard mode only: relax the linearized EE equality targets
-        // (JΔ = α·r instead of JΔ = r) when the full-target subproblem is
-        // infeasible, e.g. near a kinematic singularity or a tight velocity
-        // budget. Shrinking the trust region instead (the previous approach)
+        // Equality-relaxation retry loop, used in both modes: shrink the
+        // demanded correction (not the trust region — shrinking the box
         // only ever shrinks the feasible set and can never rescue an
-        // infeasible subproblem; relaxing the target enlarges it. Soft mode
-        // has no equality EE rows, so retrying would repeat the identical
-        // subproblem — call once and propagate any error directly. Four
-        // halvings spans a 16x range — beyond that the iterate is genuinely
-        // stuck and the error is real.
-        let (step, relaxed) = if matches!(config.ee_tracking, EeTracking::Hard) {
-            let mut alpha = 1.0;
-            let mut step = None;
-            let mut last_error = String::new();
-            for _ in 0..=4 {
-                match sqp_step(
-                    &knots, goal_poses, kinematics, config, &base, &lower, &upper, alpha,
-                ) {
-                    Ok(s) => {
-                        step = Some(s);
-                        break;
-                    }
-                    Err(e) => {
-                        last_error = e;
-                        alpha *= 0.5;
-                    }
+        // infeasible subproblem) when the full-target subproblem is
+        // infeasible, e.g. near a kinematic singularity or a tight velocity
+        // budget. Four halvings spans a 16x range — beyond that the iterate
+        // is genuinely stuck and the error is real.
+        let mut alpha = 1.0;
+        let mut step = None;
+        let mut last_error = String::new();
+        for _ in 0..=4 {
+            match sqp_step(
+                &knots,
+                goal_poses,
+                kinematics,
+                config,
+                &base,
+                &lower,
+                &upper,
+                trust_region,
+                alpha,
+            ) {
+                Ok(s) => {
+                    step = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last_error = e;
+                    alpha *= 0.5;
                 }
             }
-            let step = step.ok_or_else(|| {
-                format!(
-                    "sqp iteration {iteration}: {last_error}; ee_tracking: hard can conflict with base kinematics — try soft"
-                )
-            })?;
-            (step, alpha < 1.0)
-        } else {
-            let step = sqp_step(
-                &knots, goal_poses, kinematics, config, &base, &lower, &upper, 1.0,
-            )
-            .map_err(|e| format!("sqp iteration {iteration}: {e}"))?;
-            (step, false)
-        };
+        }
+        let step = step.ok_or_else(|| {
+            let hint = if matches!(config.ee_tracking, EeTracking::Hard) {
+                "; ee_tracking: hard can conflict with base kinematics — try soft"
+            } else {
+                ""
+            };
+            format!("sqp iteration {iteration}: {last_error}{hint}")
+        })?;
 
         let mut step_norm: f64 = 0.0;
-        for k in 0..knots.len() {
+        let mut candidate = knots.clone();
+        for k in 0..candidate.len() {
             for j in 0..n {
                 let delta = step[k * n + j];
                 step_norm = step_norm.max(delta.abs());
                 // Same clamp rationale as the IK loop: interior-point steps
                 // are feasible to tolerance, hard limits must hold exactly.
-                knots[k][j] = (knots[k][j] + delta).clamp(lower[j], upper[j]);
+                candidate[k][j] = (candidate[k][j] + delta).clamp(lower[j], upper[j]);
             }
         }
-        // A relaxed-target step can be small without meaning converged: it
-        // only satisfied a scaled-down EE target, not the real one.
-        if !relaxed && step_norm < config.convergence_step_norm {
-            converged = true;
-            break;
+
+        // Merit-based accept/reject: plain step acceptance limit-cycled on
+        // L-shaped paths (full-radius steps oscillating around the no-slip
+        // manifold instead of damping down). Accepting only steps that
+        // actually improve the ℓ1 exact-penalty merit — and shrinking the
+        // trust region when they don't — turns this into a real
+        // trust-region method instead of a fixed-step Gauss-Newton iteration.
+        let candidate_merit = merit(&candidate, goal_poses, kinematics, config, &base);
+        if candidate_merit <= current_merit - 1e-12 {
+            knots = candidate;
+            current_merit = candidate_merit;
+            trust_region = (2.0 * trust_region).min(config.trust_region);
+            // A relaxed-target step can be small without meaning converged:
+            // it only satisfied a scaled-down target, not the real one.
+            if alpha >= 1.0 && step_norm < config.convergence_step_norm {
+                converged = true;
+                break;
+            }
+        } else {
+            // Rejected: the quadratic model over-promised at this radius.
+            trust_region *= 0.5;
+            if trust_region < config.trust_region / 64.0 {
+                break; // stalled at a merit-local point; non-convergence warning below fires
+            }
         }
     }
 
@@ -353,6 +455,29 @@ pub fn optimize(
         eprintln!(
             "trajectory optimization did not converge within {} iterations; returning last iterate",
             config.sqp_max_iterations
+        );
+    }
+
+    // The progressive velocity budget only guarantees the configured limit
+    // where it is reachable within sqp_max_iterations; on a sharp enough
+    // corner it may not fully tighten in time. `converged` alone does not
+    // catch this (a relaxed budget can converge in step-norm while still
+    // exceeding the real limit), so check the final trajectory directly
+    // instead of silently returning a limit violation.
+    let mut max_velocity: f64 = 0.0;
+    for k in 0..knots.len().saturating_sub(1) {
+        // Both knots[k] and knots[k + 1] are indexed by j, so an
+        // iterator/enumerate rewrite would not actually simplify this.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let velocity = (knots[k + 1][j] - knots[k][j]).abs() / config.dt;
+            max_velocity = max_velocity.max(velocity);
+        }
+    }
+    if max_velocity > config.max_joint_velocity + 1e-6 {
+        eprintln!(
+            "trajectory optimization: final joint velocity {max_velocity} exceeds the configured limit {}",
+            config.max_joint_velocity
         );
     }
 
@@ -434,7 +559,7 @@ mod tests {
             ee_weight: 100.0,
             smoothness_weight: 1.0,
             max_joint_velocity: 2.0,
-            sqp_max_iterations: 30,
+            sqp_max_iterations: 50,
             trust_region: 0.2,
             convergence_step_norm: 1e-5,
             damping: 1e-3,
@@ -452,6 +577,16 @@ mod tests {
                     UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0),
                 )
             })
+            .collect()
+    }
+
+    // Downward-facing EE poses tracing a 90° corner: three knots along +x,
+    // then two knots along +y from the last x knot.
+    fn l_shaped_goals() -> Vec<Isometry3<f64>> {
+        let corner = UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0);
+        [(0.8, 0.5), (0.9, 0.5), (1.0, 0.5), (1.0, 0.6), (1.0, 0.7)]
+            .into_iter()
+            .map(|(x, y)| Isometry3::from_parts(Vector3::new(x, y, 0.9).into(), corner))
             .collect()
     }
 
@@ -561,6 +696,49 @@ mod tests {
             optimized_smoothness <= warm_start_smoothness + 1e-9,
             "optimized trajectory less smooth than warm start: {optimized_smoothness} > {warm_start_smoothness}"
         );
+    }
+
+    // A 90° corner puts the warm-start joint jump between the corner knots
+    // beyond budget + 2*trust_region, making the naive iteration-0
+    // subproblem infeasible. The progressive velocity budget must let the
+    // optimizer spread the turn across knots instead of erroring.
+    #[test]
+    fn l_shaped_path_respects_velocity_limits() {
+        let mut kinematics = test_kinematics();
+        let goals = l_shaped_goals();
+        let start = warm_start(&mut kinematics, &goals);
+        let mut config = test_config(EeTracking::Soft);
+        config.sqp_max_iterations = 60;
+
+        let optimized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+
+        let base = base_indices(&kinematics);
+        let (lower, upper) = kinematics.joint_limits();
+        let n = lower.len();
+        for k in 0..optimized.len() {
+            for j in 0..n {
+                assert!(
+                    optimized[k][j] >= lower[j] - 1e-9 && optimized[k][j] <= upper[j] + 1e-9,
+                    "joint {j} out of limits at knot {k}"
+                );
+            }
+            if k + 1 < optimized.len() {
+                let (residual, _) =
+                    nonholonomic_linearization(&optimized[k], &optimized[k + 1], &base);
+                assert!(
+                    residual.abs() < 1e-6,
+                    "lateral slip {residual} at interval {k}"
+                );
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..n {
+                    let velocity = (optimized[k + 1][j] - optimized[k][j]).abs() / config.dt;
+                    assert!(
+                        velocity <= config.max_joint_velocity + 1e-6,
+                        "joint {j} velocity {velocity} exceeds limit at interval {k}"
+                    );
+                }
+            }
+        }
     }
 
     // (d) Hard mode on a reachable straight path solves and also kills slip.

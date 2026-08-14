@@ -70,9 +70,11 @@ from `path.interpolate()`. Each SQP iteration solves for the step `ΔQ`.
   `max_joint_velocity` applied to all joints (the `k` crate does not expose
   URDF velocity limits; per-joint limits are YAGNI until it does).
 - **Trust region**: `|ΔQ_i| ≤ trust_region` intersected into the box bounds.
-  Plain step acceptance, no merit-function line search; the trust region plus
-  warm start keeps Gauss-Newton stable at this scale. Known ceiling: add a
-  merit-function line search if divergence is ever observed.
+  Steps are accepted or rejected against an ℓ1 exact-penalty merit function
+  (tracking + smoothness + penalty·|violations|); rejection halves the trust
+  region, acceptance regrows it toward the configured radius. Added after
+  plain acceptance limit-cycled on L-shaped paths — the originally-documented
+  ceiling.
 - **Not constrained**: the config `equality_constraints` (pinned joints) apply
   only to the warm-start IK, as today; the trajectory optimizer is free to
   move every joint. Pinning knots inside the trajectory is YAGNI.
