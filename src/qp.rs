@@ -32,15 +32,18 @@ fn to_csc(dense: &k::nalgebra::DMatrix<f64>) -> CscMatrix<f64> {
     CscMatrix::new(nrows, ncols, colptr, rowval, nzval)
 }
 
-/// Solve min ½xᵀPx + qᵀx s.t. A_eq·x = b_eq, lb ≤ x ≤ ub.
+/// Solve min ½xᵀPx + qᵀx s.t. A_eq·x = b_eq, A_in·x ≤ b_in, lb ≤ x ≤ ub.
 ///
 /// `p` must be symmetric positive semidefinite. Infinite bounds are allowed
-/// and simply contribute no constraint row. `a_eq` may have zero rows.
+/// and simply contribute no constraint row. `a_eq` and `a_in` may have zero
+/// rows.
 pub(crate) fn solve(
     p: &k::nalgebra::DMatrix<f64>,
     q: &k::nalgebra::DVector<f64>,
     a_eq: &k::nalgebra::DMatrix<f64>,
     b_eq: &k::nalgebra::DVector<f64>,
+    a_in: &k::nalgebra::DMatrix<f64>,
+    b_in: &k::nalgebra::DVector<f64>,
     lb: &k::nalgebra::DVector<f64>,
     ub: &k::nalgebra::DVector<f64>,
 ) -> Result<k::nalgebra::DVector<f64>, String> {
@@ -51,13 +54,18 @@ pub(crate) fn solve(
     // x_i ≤ ub_i  →  (+e_i)·x + s = ub_i ;  x_i ≥ lb_i  →  (−e_i)·x + s = −lb_i.
     let finite_ub: Vec<usize> = (0..n).filter(|&i| ub[i].is_finite()).collect();
     let finite_lb: Vec<usize> = (0..n).filter(|&i| lb[i].is_finite()).collect();
-    let m_ineq = finite_ub.len() + finite_lb.len();
+    let m_in = a_in.nrows();
+    let m_ineq = m_in + finite_ub.len() + finite_lb.len();
 
     let mut a = k::nalgebra::DMatrix::<f64>::zeros(m_eq + m_ineq, n);
     let mut b = k::nalgebra::DVector::<f64>::zeros(m_eq + m_ineq);
     a.slice_mut((0, 0), (m_eq, n)).copy_from(a_eq);
     b.rows_mut(0, m_eq).copy_from(b_eq);
-    let mut row = m_eq;
+    // General A_in·x ≤ b_in rows join the same nonnegative cone as the
+    // finite-bound rows: A_in·x + s = b_in with s ≥ 0.
+    a.slice_mut((m_eq, 0), (m_in, n)).copy_from(a_in);
+    b.rows_mut(m_eq, m_in).copy_from(b_in);
+    let mut row = m_eq + m_in;
     for &i in &finite_ub {
         a[(row, i)] = 1.0;
         b[row] = ub[i];
@@ -110,6 +118,10 @@ mod tests {
         (DMatrix::zeros(0, n), DVector::zeros(0))
     }
 
+    fn no_in(n: usize) -> (DMatrix<f64>, DVector<f64>) {
+        (DMatrix::zeros(0, n), DVector::zeros(0))
+    }
+
     fn free_bounds(n: usize) -> (DVector<f64>, DVector<f64>) {
         (
             DVector::from_element(n, f64::NEG_INFINITY),
@@ -121,12 +133,15 @@ mod tests {
     #[test]
     fn unconstrained_minimum() {
         let (a_eq, b_eq) = no_eq(2);
+        let (a_in, b_in) = no_in(2);
         let (lb, ub) = free_bounds(2);
         let x = solve(
             &DMatrix::identity(2, 2),
             &DVector::from_vec(vec![-1.0, -2.0]),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         )
@@ -146,12 +161,15 @@ mod tests {
         p[(1, 0)] = 1.0;
         p[(1, 1)] = 2.0;
         let (a_eq, b_eq) = no_eq(2);
+        let (a_in, b_in) = no_in(2);
         let (lb, ub) = free_bounds(2);
         let x = solve(
             &p,
             &DVector::from_vec(vec![-3.0, -3.0]),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         )
@@ -166,12 +184,15 @@ mod tests {
         let mut a_eq = DMatrix::zeros(1, 2);
         a_eq[(0, 0)] = 1.0;
         let b_eq = DVector::from_vec(vec![0.3]);
+        let (a_in, b_in) = no_in(2);
         let (lb, ub) = free_bounds(2);
         let x = solve(
             &DMatrix::identity(2, 2),
             &DVector::from_vec(vec![-1.0, -2.0]),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         )
@@ -184,6 +205,7 @@ mod tests {
     #[test]
     fn upper_bound_activates() {
         let (a_eq, b_eq) = no_eq(2);
+        let (a_in, b_in) = no_in(2);
         let (lb, mut ub) = free_bounds(2);
         ub[1] = 0.5;
         let x = solve(
@@ -191,6 +213,8 @@ mod tests {
             &DVector::from_vec(vec![-1.0, -2.0]),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         )
@@ -203,6 +227,7 @@ mod tests {
     #[test]
     fn lower_bound_activates() {
         let (a_eq, b_eq) = no_eq(2);
+        let (a_in, b_in) = no_in(2);
         let (mut lb, ub) = free_bounds(2);
         lb[1] = 3.0;
         let x = solve(
@@ -210,6 +235,8 @@ mod tests {
             &DVector::from_vec(vec![-1.0, -2.0]),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         )
@@ -224,15 +251,67 @@ mod tests {
         a_eq[(0, 0)] = 1.0;
         a_eq[(1, 0)] = 1.0;
         let b_eq = DVector::from_vec(vec![0.0, 1.0]);
+        let (a_in, b_in) = no_in(1);
         let (lb, ub) = free_bounds(1);
         let result = solve(
             &DMatrix::identity(1, 1),
             &DVector::zeros(1),
             &a_eq,
             &b_eq,
+            &a_in,
+            &b_in,
             &lb,
             &ub,
         );
         assert!(result.is_err());
+    }
+
+    // x0 + x1 ≤ 1 cuts off the unconstrained minimum [1, 2]. KKT: x = [1−μ, 2−μ]
+    // with 3 − 2μ = 1, so μ = 1 and x = [0, 1].
+    #[test]
+    fn inequality_row_activates() {
+        let (a_eq, b_eq) = no_eq(2);
+        let (lb, ub) = free_bounds(2);
+        let mut a_in = DMatrix::zeros(1, 2);
+        a_in[(0, 0)] = 1.0;
+        a_in[(0, 1)] = 1.0;
+        let b_in = DVector::from_vec(vec![1.0]);
+        let x = solve(
+            &DMatrix::identity(2, 2),
+            &DVector::from_vec(vec![-1.0, -2.0]),
+            &a_eq,
+            &b_eq,
+            &a_in,
+            &b_in,
+            &lb,
+            &ub,
+        )
+        .unwrap();
+        assert!((x[0] - 0.0).abs() < 1e-6, "got {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-6, "got {}", x[1]);
+    }
+
+    // A slack inequality (x0 + x1 ≤ 10) must leave the optimum untouched.
+    #[test]
+    fn inactive_inequality_row_ignored() {
+        let (a_eq, b_eq) = no_eq(2);
+        let (lb, ub) = free_bounds(2);
+        let mut a_in = DMatrix::zeros(1, 2);
+        a_in[(0, 0)] = 1.0;
+        a_in[(0, 1)] = 1.0;
+        let b_in = DVector::from_vec(vec![10.0]);
+        let x = solve(
+            &DMatrix::identity(2, 2),
+            &DVector::from_vec(vec![-1.0, -2.0]),
+            &a_eq,
+            &b_eq,
+            &a_in,
+            &b_in,
+            &lb,
+            &ub,
+        )
+        .unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-6, "got {}", x[0]);
+        assert!((x[1] - 2.0).abs() < 1e-6, "got {}", x[1]);
     }
 }

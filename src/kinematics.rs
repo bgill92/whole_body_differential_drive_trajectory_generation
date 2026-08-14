@@ -231,6 +231,8 @@ pub fn differential_ik(
             &q_lin,
             &a_eq,
             &(&eq_targets - &a_eq * &current_joint_positions),
+            &k::nalgebra::DMatrix::zeros(0, n),
+            &k::nalgebra::DVector::zeros(0),
             &(&lower - &current_joint_positions),
             &(&upper - &current_joint_positions),
         )?;
