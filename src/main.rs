@@ -4,7 +4,7 @@ use rerun::external::re_importer::UrdfTree;
 
 use rerun::external::re_log;
 
-use wbdd::{Config, EqualityConstraint, Kinematics, differential_ik};
+use wbdd::{Config, EqualityConstraint, Kinematics, differential_ik, trajectory};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     re_log::setup_logging();
@@ -63,6 +63,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .pop()
                     .unwrap(),
             );
+        }
+    }
+
+    // Whole-trajectory SQP pass, warm-started from the sequential IK result.
+    // Skipped in first-pose debug mode: the optimizer needs every knot.
+    if let Some(trajectory_config) = &config.trajectory {
+        if trajectory_config.enabled {
+            if config.path.solve_first_pose_only {
+                eprintln!("trajectory optimization skipped: path.solve_first_pose_only is set");
+            } else {
+                joint_positions = trajectory::optimize(
+                    &goal_poses,
+                    &mut kinematics,
+                    trajectory_config,
+                    &joint_positions,
+                )?;
+            }
         }
     }
 

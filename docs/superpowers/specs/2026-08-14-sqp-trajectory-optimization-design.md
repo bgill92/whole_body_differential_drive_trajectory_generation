@@ -158,7 +158,9 @@ IK result as today. The optimized trajectory feeds the existing
 
 - Hard mode infeasibility: `qp_not_solved: PrimalInfeasible` from `qp::solve`
   is wrapped with context: which SQP iteration, and a hint that `ee_tracking:
-  hard` may conflict with base kinematics (try `soft`).
+  hard` may conflict with base kinematics (try `soft`). Before erroring, hard
+  mode retries the iteration with the linearized EE targets scaled by α =
+  0.5…0.0625; relaxation applies only to the EE rows, never the no-slip rows.
 - All config validation errors name the offending field/joint.
 - Non-convergence within `sqp_max_iterations` is NOT an error: return the last
   iterate with a stderr log line (matches IK loop behavior, which also returns
