@@ -27,3 +27,20 @@ differential_ik:
       target_value: -1.57079
     - joint_name: ur5eelbow_joint
       target_value: 1.57079
+
+# Whole-trajectory SQP (Gauss-Newton over Clarabel QPs), warm-started from the
+# sequential IK above. Enforces diff-drive no-lateral-slip, joint velocity
+# limits, and smoothness. ee_tracking: soft (weighted cost) | hard (exact,
+# may be infeasible).
+trajectory:
+  enabled: true
+  dt: 0.5
+  ee_tracking: soft
+  ee_weight: 100.0
+  smoothness_weight: 1.0
+  max_joint_velocity: 1.0
+  sqp_max_iterations: 20
+  trust_region: 0.2
+  convergence_step_norm: 1.0e-4
+  damping: 1.0e-3
+  base_joint_names: [world_base_link_planar_prismatic_x, world_base_link_planar_prismatic_y, world_base_link_planar_yaw]
