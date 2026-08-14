@@ -1,5 +1,5 @@
-use crate::active_set::{Constraint, ConstraintKind, active_set_step};
 use crate::configs::DifferentialIkConfig;
+use crate::qp;
 
 /// Matrix logarithm of a homogeneous transform: SE(3) -> se(3).
 ///
@@ -49,7 +49,10 @@ pub struct Kinematics {
 }
 
 impl Kinematics {
-    pub fn build(urdf_path: &str, serial_chain_end_joint: &str) -> Result<Kinematics, &'static str> {
+    pub fn build(
+        urdf_path: &str,
+        serial_chain_end_joint: &str,
+    ) -> Result<Kinematics, &'static str> {
         let chain = k::Chain::<f64>::from_urdf_file(urdf_path).unwrap();
         let end = chain
             .find(serial_chain_end_joint)
@@ -110,47 +113,42 @@ impl Kinematics {
 
         (lower, upper)
     }
-
 }
 
-/// Resolve configured equality constraints to joint indices.
-/// Errors on unknown joint names and on targets outside the joint's limits.
+/// Build the equality system A_eq·q = targets from the configured constraints.
+/// A_eq is one selector row per constraint; `targets` are absolute joint
+/// values. Errors on unknown joint names and on targets outside joint limits.
 fn resolve_equality_constraints(
     joint_names: &[String],
     config: &DifferentialIkConfig,
     lower: &k::nalgebra::DVector<f64>,
     upper: &k::nalgebra::DVector<f64>,
-) -> Result<Vec<Constraint>, String> {
-    for c in &config.equality_constraints {
-        if !joint_names.contains(&c.joint_name) {
+) -> Result<(k::nalgebra::DMatrix<f64>, k::nalgebra::DVector<f64>), String> {
+    let n = joint_names.len();
+    let m = config.equality_constraints.len();
+    let mut a_eq = k::nalgebra::DMatrix::<f64>::zeros(m, n);
+    let mut targets = k::nalgebra::DVector::<f64>::zeros(m);
+
+    for (row, c) in config.equality_constraints.iter().enumerate() {
+        let i = joint_names
+            .iter()
+            .position(|name| name == &c.joint_name)
+            .ok_or_else(|| {
+                format!(
+                    "equality constraint joint '{}' not in serial chain",
+                    c.joint_name
+                )
+            })?;
+        if c.target_value < lower[i] || c.target_value > upper[i] {
             return Err(format!(
-                "equality constraint joint '{}' not in serial chain",
-                c.joint_name
+                "equality target {} for joint '{}' outside limits [{}, {}]",
+                c.target_value, c.joint_name, lower[i], upper[i]
             ));
         }
+        a_eq[(row, i)] = 1.0;
+        targets[row] = c.target_value;
     }
-
-    let mut resolved = Vec::new();
-    for (i, name) in joint_names.iter().enumerate() {
-        if let Some(c) = config
-            .equality_constraints
-            .iter()
-            .find(|c| &c.joint_name == name)
-        {
-            if c.target_value < lower[i] || c.target_value > upper[i] {
-                return Err(format!(
-                    "equality target {} for joint '{}' outside limits [{}, {}]",
-                    c.target_value, name, lower[i], upper[i]
-                ));
-            }
-            resolved.push(Constraint {
-                joint_index: i,
-                target: c.target_value,
-                kind: ConstraintKind::Equality,
-            });
-        }
-    }
-    Ok(resolved)
+    Ok((a_eq, targets))
 }
 
 /// Body twist [v; omega] taking `current_pose` to `goal_pose`.
@@ -165,10 +163,9 @@ fn pose_error_twist(
 /// Solve inverse kinematics using differential IK.
 ///
 /// Each step solves a damped-least-squares QP subject to user equality
-/// constraints and URDF joint limits. Limits are handled with an active-set
-/// working loop: limits at the current configuration seed the working set,
-/// wrong-signed Lagrange multipliers drop rows, violated inactive limits add
-/// rows, and the accepted step satisfies every limit exactly.
+/// constraints and URDF joint limits, via Clarabel (see `qp::solve`). Clarabel's
+/// interior-point method handles which limits are active internally, replacing
+/// the hand-rolled active-set loop this function used to run.
 pub fn differential_ik(
     goal_pose: &k::Isometry3<f64>,
     kinematics: &mut Kinematics,
@@ -176,8 +173,8 @@ pub fn differential_ik(
 ) -> Result<Vec<Vec<f64>>, String> {
     let (lower, upper) = kinematics.joint_limits();
 
-    // Resolve constraint joint names to indices once at startup
-    let equality_constraints =
+    // Resolve constraint joint names to an equality system once at startup.
+    let (a_eq, eq_targets) =
         resolve_equality_constraints(&kinematics.joint_names(), config, &lower, &upper)?;
 
     let goal_pose = goal_pose.to_homogeneous();
@@ -193,16 +190,35 @@ pub fn differential_ik(
 
         let current_joint_positions = k::nalgebra::DVector::from_vec(kinematics.positions());
         let jacobian = kinematics.jacobian();
+        let n = current_joint_positions.len();
 
-        let updated_joint_positions = active_set_step(
-            &jacobian,
-            &twist,
-            &current_joint_positions,
-            &equality_constraints,
-            &lower,
-            &upper,
-            config.damping_factor,
+        // Damped Gauss-Newton step as a QP over dq:
+        //   min ½dqᵀ(JᵀJ + λ²I)dq − (Jᵀν)ᵀdq
+        //   s.t. A_eq·dq = targets − q  (pinned joints, absolute targets)
+        //        lower − q ≤ dq ≤ upper − q  (joint limits)
+        // Equivalent to the old DLS/KKT step; Clarabel handles which limits
+        // are active, replacing the hand-rolled active-set loop.
+        let jt = jacobian.transpose();
+        let p =
+            &jt * &jacobian + config.damping_factor.powi(2) * k::nalgebra::DMatrix::identity(n, n);
+        let twist_dyn = k::nalgebra::DVector::from_vec(twist.as_slice().to_vec());
+        let q_lin = -(&jt * &twist_dyn);
+
+        let dq = qp::solve(
+            &p,
+            &q_lin,
+            &a_eq,
+            &(&eq_targets - &a_eq * &current_joint_positions),
+            &(&lower - &current_joint_positions),
+            &(&upper - &current_joint_positions),
         )?;
+
+        // Interior-point iterates are feasible to solver tolerance, not
+        // exactly; clamp so downstream consumers can rely on hard limits.
+        let mut updated_joint_positions = current_joint_positions + dq;
+        for i in 0..n {
+            updated_joint_positions[i] = updated_joint_positions[i].clamp(lower[i], upper[i]);
+        }
 
         // Feed back for next iteration's Jacobian computation
         kinematics.set_positions(updated_joint_positions.as_slice());

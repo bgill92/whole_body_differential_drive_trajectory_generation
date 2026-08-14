@@ -1,4 +1,3 @@
-mod active_set;
 mod configs;
 mod kinematics;
 mod qp;
