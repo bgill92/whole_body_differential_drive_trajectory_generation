@@ -73,8 +73,12 @@ pub(crate) fn solve(
         SupportedConeT::ZeroConeT(m_eq),
         SupportedConeT::NonnegativeConeT(m_ineq),
     ];
+    // Default tol_feas (1e-8) leaves pinned-joint assertions at 1e-9 passing
+    // only on incidental margin; tighten so equality rows are held to a
+    // tolerance the callers can actually rely on.
     let settings = DefaultSettingsBuilder::default()
         .verbose(false)
+        .tol_feas(1e-12)
         .build()
         .map_err(|e| format!("clarabel_settings: {e:?}"))?;
 

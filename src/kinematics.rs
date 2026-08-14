@@ -117,7 +117,8 @@ impl Kinematics {
 
 /// Build the equality system A_eq·q = targets from the configured constraints.
 /// A_eq is one selector row per constraint; `targets` are absolute joint
-/// values. Errors on unknown joint names and on targets outside joint limits.
+/// values. Errors on unknown joint names, duplicate joints, and on targets
+/// outside joint limits.
 fn resolve_equality_constraints(
     joint_names: &[String],
     config: &DifferentialIkConfig,
@@ -128,6 +129,7 @@ fn resolve_equality_constraints(
     let m = config.equality_constraints.len();
     let mut a_eq = k::nalgebra::DMatrix::<f64>::zeros(m, n);
     let mut targets = k::nalgebra::DVector::<f64>::zeros(m);
+    let mut seen_joints = std::collections::HashSet::new();
 
     for (row, c) in config.equality_constraints.iter().enumerate() {
         let i = joint_names
@@ -139,6 +141,16 @@ fn resolve_equality_constraints(
                     c.joint_name
                 )
             })?;
+        // Two rows pinning the same joint to different targets make the
+        // per-step QP infeasible, surfacing later as an opaque
+        // `qp_not_solved: PrimalInfeasible` -- catch it here with a clear
+        // message instead.
+        if !seen_joints.insert(&c.joint_name) {
+            return Err(format!(
+                "duplicate equality constraint for joint '{}'",
+                c.joint_name
+            ));
+        }
         if c.target_value < lower[i] || c.target_value > upper[i] {
             return Err(format!(
                 "equality target {} for joint '{}' outside limits [{}, {}]",
@@ -171,6 +183,16 @@ pub fn differential_ik(
     kinematics: &mut Kinematics,
     config: &DifferentialIkConfig,
 ) -> Result<Vec<Vec<f64>>, String> {
+    // P = JᵀJ + λ²I must be positive definite; with λ ≤ 0 and a singular J
+    // the QP has no unique minimizer and Clarabel would return one
+    // arbitrarily rather than erroring, unlike the old DLS solve.
+    if config.damping_factor <= 0.0 {
+        return Err(format!(
+            "damping_factor must be > 0: P = JᵀJ + λ²I must be positive definite (got {})",
+            config.damping_factor
+        ));
+    }
+
     let (lower, upper) = kinematics.joint_limits();
 
     // Resolve constraint joint names to an equality system once at startup.
@@ -417,6 +439,36 @@ mod tests {
             joint_name: "no_such_joint".to_string(),
             target_value: 0.0,
         }]);
+        assert!(differential_ik(&goal, &mut kinematics, &config).is_err());
+    }
+
+    #[test]
+    fn duplicate_equality_constraint_errors() {
+        let mut kinematics = test_kinematics();
+        let goal = kinematics.end_pose();
+
+        // Two constraints on the same joint make every per-step QP
+        // infeasible; this must be rejected up front with a clear message.
+        let config = test_config(vec![
+            crate::configs::EqualityConstraint {
+                joint_name: "ur5eshoulder_pan_joint".to_string(),
+                target_value: 0.5,
+            },
+            crate::configs::EqualityConstraint {
+                joint_name: "ur5eshoulder_pan_joint".to_string(),
+                target_value: 1.0,
+            },
+        ]);
+        assert!(differential_ik(&goal, &mut kinematics, &config).is_err());
+    }
+
+    #[test]
+    fn non_positive_damping_errors() {
+        let mut kinematics = test_kinematics();
+        let goal = kinematics.end_pose();
+
+        let mut config = test_config(vec![]);
+        config.damping_factor = 0.0;
         assert!(differential_ik(&goal, &mut kinematics, &config).is_err());
     }
 }
