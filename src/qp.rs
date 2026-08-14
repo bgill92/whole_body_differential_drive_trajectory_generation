@@ -1,5 +1,5 @@
 //! Generic dense convex QP solved with Clarabel:
-//!   min ½ xᵀPx + qᵀx   s.t.   A_eq·x = b_eq,   lb ≤ x ≤ ub
+//!   min ½ xᵀPx + qᵀx   s.t.   A_eq·x = b_eq,   A_in·x ≤ b_in,   lb ≤ x ≤ ub
 //! Dense inputs are fine at IK size (n ≈ 10). This is also the seam the
 //! future SQP/Gauss-Newton trajectory optimizer hands its subproblems to.
 
@@ -37,6 +37,9 @@ fn to_csc(dense: &k::nalgebra::DMatrix<f64>) -> CscMatrix<f64> {
 /// `p` must be symmetric positive semidefinite. Infinite bounds are allowed
 /// and simply contribute no constraint row. `a_eq` and `a_in` may have zero
 /// rows.
+// The argument list mirrors the QP's mathematical structure; bundling into a
+// struct would obscure it for no safety gain.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn solve(
     p: &k::nalgebra::DMatrix<f64>,
     q: &k::nalgebra::DVector<f64>,
