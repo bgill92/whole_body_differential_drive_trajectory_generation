@@ -174,7 +174,9 @@ IK result as today. The optimized trajectory feeds the existing
   tests): 3–5 knot straight-line path; assert after optimization
   (a) `|c_k| < 1e-6` every interval (no lateral slip),
   (b) `|Δq|/dt ≤ max_joint_velocity + 1e-9` every interval,
-  (c) mean EE tracking error ≤ warm start's (soft mode),
+  (c) mean EE tracking error stays bounded (< 0.25 combined twist norm, soft
+      mode) — it cannot beat the unconstrained warm start, which the original
+      draft of this line wrongly claimed,
   (d) hard mode on a base-reachable path solves; hard mode on a deliberately
   side-stepping path returns the infeasibility error.
 - Existing 16 tests unchanged (the `qp::solve` signature change updates call
