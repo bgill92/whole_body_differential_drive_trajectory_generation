@@ -131,6 +131,31 @@ mod tests {
         assert!((x[1] - 2.0).abs() < 1e-6, "got {}", x[1]);
     }
 
+    // Off-diagonal P guards the full-symmetric-P contract with Clarabel (it
+    // triangularizes internally) and exercises to_csc with multiple entries
+    // per column. min ½xᵀ[[2,1],[1,2]]x - [3,3]ᵀx has its minimum at [1, 1].
+    #[test]
+    fn off_diagonal_p_solves() {
+        let mut p = DMatrix::zeros(2, 2);
+        p[(0, 0)] = 2.0;
+        p[(0, 1)] = 1.0;
+        p[(1, 0)] = 1.0;
+        p[(1, 1)] = 2.0;
+        let (a_eq, b_eq) = no_eq(2);
+        let (lb, ub) = free_bounds(2);
+        let x = solve(
+            &p,
+            &DVector::from_vec(vec![-3.0, -3.0]),
+            &a_eq,
+            &b_eq,
+            &lb,
+            &ub,
+        )
+        .unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-6, "got {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-6, "got {}", x[1]);
+    }
+
     // Same objective, but x0 pinned to 0.3 by an equality row.
     #[test]
     fn equality_row_held() {
