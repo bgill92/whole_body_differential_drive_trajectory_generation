@@ -5,7 +5,10 @@ end_joint: ur5ewrist_3_joint
 # rotation slerp) into poses_per_segment poses per segment. rpy is
 # roll-pitch-yaw in radians.
 path:
-  poses_per_segment: 10
+  poses_per_segment: 100
+  # Round interior waypoint corners with tangent circular arcs of this
+  # radius (meters); 0 leaves corners sharp. Clamped per corner to fit.
+  corner_radius: 0.3
   # Debug: only solve the first pose of the interpolated path.
   solve_first_pose_only: false
   # Pin base yaw for the first pose so the base x-axis points along the path.
