@@ -86,10 +86,12 @@ pub(crate) fn solve(
     ];
     // Default tol_feas (1e-8) leaves pinned-joint assertions at 1e-9 passing
     // only on incidental margin; tighten so equality rows are held to a
-    // tolerance the callers can actually rely on.
+    // tolerance the callers can rely on. Not tighter than 1e-10: 1e-12
+    // stalls Clarabel (InsufficientProgress) on large dense trajectory
+    // subproblems (~1800 variables).
     let settings = DefaultSettingsBuilder::default()
         .verbose(false)
-        .tol_feas(1e-12)
+        .tol_feas(1e-10)
         .build()
         .map_err(|e| format!("clarabel_settings: {e:?}"))?;
 

@@ -373,6 +373,10 @@ pub fn optimize(
     // trust region collapsing (a merit-local point the quadratic model can't
     // improve on at any radius). Some(iteration) records where it stalled.
     let mut stalled: Option<usize> = None;
+    // Set when the QP solver itself gave up mid-run after at least one
+    // accepted step; the loop then returns the best iterate so far.
+    let mut solver_stopped: Option<(usize, String)> = None;
+    let mut accepted_any = false;
     for iteration in 0..config.sqp_max_iterations {
         // Equality-relaxation retry loop, used in both modes: shrink the
         // demanded correction (not the trust region — shrinking the box
@@ -409,14 +413,24 @@ pub fn optimize(
                 }
             }
         }
-        let step = step.ok_or_else(|| {
+        let Some(step) = step else {
             let hint = if matches!(config.ee_tracking, EeTracking::Hard) {
                 "; ee_tracking: hard can conflict with base kinematics — try soft"
             } else {
                 ""
             };
-            format!("sqp iteration {iteration}: {last_error}{hint}")
-        })?;
+            // A solver failure before any accepted step means the problem is
+            // wrong (infeasible or degenerate) — error. After progress has
+            // been made, the iterate is a valid clamped trajectory and a
+            // mid-run stall (e.g. Clarabel InsufficientProgress on large
+            // dense subproblems) degrades to best-effort, matching the
+            // non-convergence policy instead of discarding the progress.
+            if !accepted_any {
+                return Err(format!("sqp iteration {iteration}: {last_error}{hint}"));
+            }
+            solver_stopped = Some((iteration, last_error));
+            break;
+        };
 
         let mut step_norm: f64 = 0.0;
         let mut candidate = knots.clone();
@@ -441,6 +455,7 @@ pub fn optimize(
         // threshold would spuriously accept non-improving steps there.
         let candidate_merit = merit(&candidate, goal_poses, kinematics, config, &base);
         if candidate_merit <= current_merit - 1e-12 * current_merit.max(1.0) {
+            accepted_any = true;
             knots = candidate;
             current_merit = candidate_merit;
             trust_region = (2.0 * trust_region).min(config.trust_region);
@@ -474,12 +489,15 @@ pub fn optimize(
         // why: exhausting the iteration budget is fixable by raising
         // sqp_max_iterations, while a collapsed trust region means the
         // merit landscape itself is stuck at this radius floor.
-        match stalled {
-            Some(iteration) => eprintln!(
+        match (solver_stopped, stalled) {
+            (Some((iteration, error)), _) => eprintln!(
+                "trajectory optimization: solver stopped at iteration {iteration} ({error}); returning last iterate"
+            ),
+            (None, Some(iteration)) => eprintln!(
                 "trajectory optimization: trust region collapsed after {} iterations; returning last iterate",
                 iteration + 1
             ),
-            None => eprintln!(
+            (None, None) => eprintln!(
                 "trajectory optimization did not converge within {} iterations; returning last iterate",
                 config.sqp_max_iterations
             ),
