@@ -232,6 +232,15 @@ fn rounded_pieces(waypoints: &[k::Isometry3<f64>], radius: f64) -> Vec<PathPiece
     for i in 1..n {
         let segment = positions[i] - positions[i - 1];
         let segment_length = segment.norm();
+        // Zero-length segments (duplicate consecutive waypoints) carry no
+        // fillet and no line piece; advance the cursor directly, or the 0/0
+        // below poisons every later piece with NaN and silently truncates
+        // the path.
+        if segment_length < 1e-12 {
+            cursor_position = positions[i];
+            cursor_rotation = rotations[i];
+            continue;
+        }
         let cut = fillets[i].as_ref().map_or(0.0, |f| f.cut);
         // The straight run ends at the fillet entry (or the waypoint itself
         // when the corner is sharp or this is the final segment); its end
@@ -287,6 +296,11 @@ fn sample_rounded(
     let pieces = rounded_pieces(waypoints, radius);
     let total_length: f64 = pieces.iter().map(|p| p.length).sum();
     let count = 1 + (waypoints.len() - 1) * poses_per_segment;
+    // poses_per_segment = 0 degenerates to a single pose; match the legacy
+    // loop's output instead of dividing by count - 1 = 0 below.
+    if count == 1 || pieces.is_empty() {
+        return vec![waypoints[0]];
+    }
 
     let mut poses = Vec::with_capacity(count);
     for index in 0..count {
@@ -488,6 +502,30 @@ trajectory:
         assert!(
             (clearance - expected).abs() < 5e-3,
             "clamped clearance {clearance}, expected ~{expected}"
+        );
+        for pose in &poses {
+            assert!(pose.translation.vector.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn duplicate_waypoints_do_not_truncate_path() {
+        let mut path = right_angle_path(0.2);
+        path.waypoints.insert(
+            1,
+            Pose {
+                xyz: [1.0, 0.0, 0.0],
+                rpy: [0.0, 0.0, 0.0],
+            },
+        );
+        let poses = path.interpolate();
+        assert_eq!(poses.len(), 1 + 3 * 50);
+        // A 0/0 in the zero-length segment used to NaN-poison the piece
+        // chain and silently drop everything after the duplicate.
+        let end = poses.last().unwrap().translation.vector;
+        assert!(
+            (end - Vector3::new(1.0, 1.0, 0.0)).norm() < 1e-9,
+            "path truncated at {end:?}"
         );
         for pose in &poses {
             assert!(pose.translation.vector.iter().all(|v| v.is_finite()));
