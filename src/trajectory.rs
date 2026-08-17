@@ -48,6 +48,39 @@ fn nonholonomic_linearization(
     (residual, partials)
 }
 
+/// Forward progress of the base over one knot interval, linearized at the
+/// current configurations: s = cos(θ̄)·Δx + sin(θ̄)·Δy with θ̄ the midpoint
+/// heading — the longitudinal counterpart of `nonholonomic_linearization`
+/// (s = v·dt when the no-slip constraint holds; negative s is reverse motion).
+///
+/// Same return convention: the value and the six nonzero partials as
+/// (index into the concatenated [q_k ‖ q_k1], value).
+fn forward_progress_linearization(
+    q_k: &[f64],
+    q_k1: &[f64],
+    base: &BaseIndices,
+) -> (f64, [(usize, f64); 6]) {
+    let n = q_k.len();
+    let dx = q_k1[base.x] - q_k[base.x];
+    let dy = q_k1[base.y] - q_k[base.y];
+    let mid_yaw = 0.5 * (q_k[base.yaw] + q_k1[base.yaw]);
+    let (sin_mid, cos_mid) = mid_yaw.sin_cos();
+
+    let progress = cos_mid * dx + sin_mid * dy;
+    // d/dθ̄ (cos θ̄·Δx + sin θ̄·Δy) = −sin θ̄·Δx + cos θ̄·Δy, and ∂θ̄/∂θ_k =
+    // ∂θ̄/∂θ_{k+1} = ½, so both yaw partials share this value.
+    let dyaw = 0.5 * (-sin_mid * dx + cos_mid * dy);
+    let partials = [
+        (base.x, -cos_mid),
+        (base.y, -sin_mid),
+        (base.yaw, dyaw),
+        (n + base.x, cos_mid),
+        (n + base.y, sin_mid),
+        (n + base.yaw, dyaw),
+    ];
+    (progress, partials)
+}
+
 /// Elementwise block accumulation; avoids relying on slice AddAssign support
 /// in the old nalgebra shipped through the k crate.
 fn add_block(p: &mut DMat, row0: usize, col0: usize, block: &DMat) {
@@ -139,6 +172,11 @@ fn merit(
         let (residual, _) =
             nonholonomic_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
         total += MERIT_PENALTY * residual.abs();
+        // One-sided backward-motion cost; matches sqp_step's Gauss-Newton
+        // model of ½·w·min(s, 0)².
+        let (progress, _) =
+            forward_progress_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+        total += 0.5 * config.backward_weight * progress.min(0.0).powi(2);
         #[allow(clippy::needless_range_loop)]
         for j in 0..n {
             let difference = (knots[k + 1][j] - knots[k][j]).abs();
@@ -234,6 +272,27 @@ fn sqp_step(
             let difference = knots[k + 1][j] - knots[k][j];
             q_lin[k * n + j] -= w * difference;
             q_lin[(k + 1) * n + j] += w * difference;
+        }
+    }
+
+    // Backward-motion penalty ½·w·min(s, 0)², handled Gauss-Newton style:
+    // intervals currently reversing (s < 0) contribute w·ggᵀ to P and w·s·g
+    // to q with g = ∇s; forward intervals contribute nothing. The cost is C¹
+    // at s = 0, so intervals flipping in/out of the active set between
+    // iterations stay merit-consistent.
+    if config.backward_weight > 0.0 {
+        for k in 0..num_intervals {
+            let (progress, partials) =
+                forward_progress_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+            if progress < 0.0 {
+                let w = config.backward_weight;
+                for (row_offset, row_value) in partials {
+                    for (col_offset, col_value) in partials {
+                        p[(k * n + row_offset, k * n + col_offset)] += w * row_value * col_value;
+                    }
+                    q_lin[k * n + row_offset] += w * progress * row_value;
+                }
+            }
         }
     }
 
@@ -340,8 +399,10 @@ pub fn optimize(
     // Negative weights make P indefinite (JᵀJ and the smoothness Laplacian
     // are only guaranteed PSD with a nonnegative coefficient); a nonpositive
     // velocity budget makes every interval's inequality rows infeasible.
-    if config.ee_weight < 0.0 || config.smoothness_weight < 0.0 {
-        return Err("trajectory ee_weight and smoothness_weight must be >= 0".to_string());
+    if config.ee_weight < 0.0 || config.smoothness_weight < 0.0 || config.backward_weight < 0.0 {
+        return Err(
+            "trajectory ee_weight, smoothness_weight, and backward_weight must be >= 0".to_string(),
+        );
     }
     if config.max_joint_velocity <= 0.0 {
         return Err("trajectory max_joint_velocity must be > 0".to_string());
@@ -569,6 +630,47 @@ mod tests {
         }
     }
 
+    // Central finite differences over every entry of [q_k ‖ q_k1] must match
+    // the analytic partials of the forward-progress function.
+    #[test]
+    fn forward_progress_linearization_matches_finite_differences() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        let q_k = [0.3, -0.2, 0.7, 0.1];
+        let q_k1 = [0.6, 0.1, 1.1, -0.4];
+
+        let (_, partials) = forward_progress_linearization(&q_k, &q_k1, &base);
+        let mut analytic = [0.0; 8];
+        for (index, value) in partials {
+            analytic[index] = value;
+        }
+
+        let eps = 1e-6;
+        for i in 0..8 {
+            let mut plus = [q_k, q_k1].concat();
+            let mut minus = plus.clone();
+            plus[i] += eps;
+            minus[i] -= eps;
+            let s_plus = forward_progress_linearization(&plus[..4], &plus[4..], &base).0;
+            let s_minus = forward_progress_linearization(&minus[..4], &minus[4..], &base).0;
+            let fd = (s_plus - s_minus) / (2.0 * eps);
+            assert!(
+                (fd - analytic[i]).abs() < 1e-6,
+                "partial {i}: finite difference {fd} vs analytic {}",
+                analytic[i]
+            );
+        }
+    }
+
+    // Forward motion along the heading must read +1, reverse motion -1.
+    #[test]
+    fn forward_progress_semantics() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        let (s, _) = forward_progress_linearization(&[0.0, 0.0, 0.0], &[1.0, 0.0, 0.0], &base);
+        assert!((s - 1.0).abs() < 1e-12, "forward motion progress: {s}");
+        let (s, _) = forward_progress_linearization(&[1.0, 0.0, 0.0], &[0.0, 0.0, 0.0], &base);
+        assert!((s + 1.0).abs() < 1e-12, "reverse motion progress: {s}");
+    }
+
     // A pure-forward motion (heading exactly along the displacement) must
     // satisfy the constraint; a pure-sideways one must violate it maximally.
     #[test]
@@ -604,6 +706,7 @@ mod tests {
             ee_tracking,
             ee_weight: 100.0,
             smoothness_weight: 1.0,
+            backward_weight: 0.0,
             max_joint_velocity: 2.0,
             sqp_max_iterations: 50,
             trust_region: 0.2,
@@ -839,6 +942,50 @@ mod tests {
         );
     }
 
+    // Goals receding along -x with the base already pulled forward: with
+    // backward_weight = 0 the optimizer backs the base up along its heading;
+    // a large weight must suppress most of that reverse motion.
+    #[test]
+    fn backward_weight_suppresses_reverse_motion() {
+        let mut kinematics = test_kinematics();
+        let corner = UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0);
+        let goals: Vec<Isometry3<f64>> = (0..5)
+            .map(|i| {
+                Isometry3::from_parts(Vector3::new(1.2 - 0.15 * i as f64, 0.5, 0.9).into(), corner)
+            })
+            .collect();
+        let start = warm_start(&mut kinematics, &goals);
+        let base = base_indices(&kinematics);
+
+        let backward_total = |trajectory: &[Vec<f64>]| -> f64 {
+            (0..trajectory.len() - 1)
+                .map(|k| {
+                    forward_progress_linearization(&trajectory[k], &trajectory[k + 1], &base)
+                        .0
+                        .min(0.0)
+                        .abs()
+                })
+                .sum()
+        };
+
+        let mut config = test_config(EeTracking::Soft);
+        config.sqp_max_iterations = 100;
+        let unpenalized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        let baseline = backward_total(&unpenalized);
+        assert!(
+            baseline > 0.05,
+            "scenario induces no reverse motion to penalize: {baseline}"
+        );
+
+        config.backward_weight = 1000.0;
+        let penalized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        let remaining = backward_total(&penalized);
+        assert!(
+            remaining < 0.25 * baseline,
+            "penalty left {remaining} of {baseline} reverse motion"
+        );
+    }
+
     #[test]
     fn validation_errors() {
         let mut kinematics = test_kinematics();
@@ -860,6 +1007,11 @@ mod tests {
         // Non-positive dt.
         let mut config = test_config(EeTracking::Soft);
         config.dt = 0.0;
+        assert!(optimize(&goals, &mut kinematics, &config, &start).is_err());
+
+        // Negative backward weight.
+        let mut config = test_config(EeTracking::Soft);
+        config.backward_weight = -1.0;
         assert!(optimize(&goals, &mut kinematics, &config, &start).is_err());
     }
 }
