@@ -62,23 +62,27 @@ pub fn slip_residuals(joint_positions: &[Vec<f64>], base: &BaseIndices) -> Vec<f
 }
 
 /// Worst and out-of-tolerance slip over a residual series.
+#[derive(Debug, Clone, Copy)]
 pub struct SlipSummary {
     pub max_abs: f64,
-    /// Knot interval of the worst violation; 0 for an empty series.
-    pub max_index: usize,
+    /// Knot interval of the worst violation; `None` for an empty series.
+    pub max_index: Option<usize>,
     pub count_above_tol: usize,
 }
 
+/// Summarize a slip-residual series; a residual counts as a violation when
+/// its magnitude exceeds `SLIP_TOLERANCE`.
 pub fn summarize_slip(residuals: &[f64]) -> SlipSummary {
     let mut max_abs = 0.0;
-    let mut max_index = 0;
+    let mut max_index = None;
     let mut count_above_tol = 0;
     for (i, r) in residuals.iter().enumerate() {
-        if r.abs() > max_abs {
-            max_abs = r.abs();
-            max_index = i;
+        let abs = r.abs();
+        if abs > max_abs {
+            max_abs = abs;
+            max_index = Some(i);
         }
-        if r.abs() > SLIP_TOLERANCE {
+        if abs > SLIP_TOLERANCE {
             count_above_tol += 1;
         }
     }
@@ -156,7 +160,7 @@ mod tests {
     fn summarize_slip_finds_max_and_counts() {
         let summary = summarize_slip(&[1e-9, -3e-3, 2e-4]);
         assert!((summary.max_abs - 3e-3).abs() < 1e-15);
-        assert_eq!(summary.max_index, 1);
+        assert_eq!(summary.max_index, Some(1));
         assert_eq!(summary.count_above_tol, 2);
     }
 
@@ -164,6 +168,7 @@ mod tests {
     fn summarize_slip_empty_is_clean() {
         let summary = summarize_slip(&[]);
         assert_eq!(summary.max_abs, 0.0);
+        assert!(summary.max_index.is_none());
         assert_eq!(summary.count_above_tol, 0);
     }
 }
