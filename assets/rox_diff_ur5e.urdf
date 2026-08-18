@@ -874,4 +874,14 @@ Contributor: Adarsh Karan K P
     <origin rpy="0 0 0" xyz="-0.00563134 0.0 0.04718515"/>
     <mimic joint="robotiq_85_left_knuckle_joint"/>
   </joint>
+  <!-- This link aligns the axes of the grasp frame to our required convention for motion planning tasks. -->
+  <!-- Positive X points to the robots left and is parallel to the direction the fingers move -->
+  <!-- Positive Y points up towards the top of the gripper (from the wrist camera's perspective, if present) -->
+  <!-- Positive Z points out of the gripper -->
+  <link name="grasp_link"/>
+  <joint name="grasp_link_joint" type="fixed">
+    <parent link="robotiq_85_base_link"/>
+    <child link="grasp_link"/>
+    <origin rpy="0.0 0.0 3.141592653589793" xyz="0.0 0.0 0.134"/>
+  </joint>
 </robot>

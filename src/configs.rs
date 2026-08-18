@@ -49,6 +49,11 @@ pub struct TrajectoryConfig {
     /// Soft-mode EE cost weight; unused in hard mode.
     pub ee_weight: f64,
     pub smoothness_weight: f64,
+    /// One-sided quadratic penalty on backward base motion per interval
+    /// (½·w·min(s, 0)² with s the forward progress along the heading);
+    /// 0 (the default) allows free reversing.
+    #[serde(default)]
+    pub backward_weight: f64,
     /// One scalar for all joints; the k crate does not expose URDF velocity
     /// limits, so per-joint limits are deferred until it does.
     pub max_joint_velocity: f64,
