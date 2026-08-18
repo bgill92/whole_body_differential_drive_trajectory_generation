@@ -43,6 +43,12 @@ The pipeline has three stages:
    Design notes:
    [docs/superpowers/specs/2026-08-14-sqp-trajectory-optimization-design.md](docs/superpowers/specs/2026-08-14-sqp-trajectory-optimization-design.md).
 
+After solving, the program reports **diagnostics** for both the sequential-IK
+and SQP trajectories: per-knot end-effector position/orientation error and the
+per-interval lateral-slip residual of the base, logged as Rerun time series
+(`diagnostics/{ik,sqp}/...` on the `step` timeline) with a console summary of
+the worst violations.
+
 ## Requirements
 
 - Rust (edition 2024 — a recent stable toolchain)
@@ -119,6 +125,7 @@ src/
   configs.rs        # config structs + YAML parsing + path interpolation
   kinematics.rs     # k-based FK/Jacobians, SE(3) log, differential IK loop
   qp.rs             # generic dense convex QP wrapper over Clarabel
+  diagnostics.rs    # pose-tracking error + nonholonomic slip residuals
   trajectory.rs     # Gauss-Newton SQP whole-trajectory optimizer
   visualization.rs  # Rerun logging (URDF, path, goal axes, trajectory)
 assets/
