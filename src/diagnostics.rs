@@ -3,6 +3,7 @@
 //! solvers. See docs/superpowers/specs/2026-08-18-trajectory-diagnostics-design.md.
 
 /// Chain indices of the planar base joints.
+#[derive(Debug, Clone, Copy)]
 pub struct BaseIndices {
     pub x: usize,
     pub y: usize,
@@ -46,6 +47,48 @@ pub fn slip_residual(q_k: &[f64], q_k1: &[f64], base: &BaseIndices) -> f64 {
     sin_mid * dx - cos_mid * dy
 }
 
+/// Slip tolerance in meters of lateral motion per knot interval. Residuals
+/// below this are solver noise, not violations.
+// ponytail: constant, promote to config if a use case needs tuning it.
+pub const SLIP_TOLERANCE: f64 = 1e-6;
+
+/// Lateral-slip residual for every knot interval; length is one less than
+/// the trajectory. Empty for trajectories with fewer than two knots.
+pub fn slip_residuals(joint_positions: &[Vec<f64>], base: &BaseIndices) -> Vec<f64> {
+    joint_positions
+        .windows(2)
+        .map(|pair| slip_residual(&pair[0], &pair[1], base))
+        .collect()
+}
+
+/// Worst and out-of-tolerance slip over a residual series.
+pub struct SlipSummary {
+    pub max_abs: f64,
+    /// Knot interval of the worst violation; 0 for an empty series.
+    pub max_index: usize,
+    pub count_above_tol: usize,
+}
+
+pub fn summarize_slip(residuals: &[f64]) -> SlipSummary {
+    let mut max_abs = 0.0;
+    let mut max_index = 0;
+    let mut count_above_tol = 0;
+    for (i, r) in residuals.iter().enumerate() {
+        if r.abs() > max_abs {
+            max_abs = r.abs();
+            max_index = i;
+        }
+        if r.abs() > SLIP_TOLERANCE {
+            count_above_tol += 1;
+        }
+    }
+    SlipSummary {
+        max_abs,
+        max_index,
+        count_above_tol,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,13 +117,13 @@ mod tests {
 
     #[test]
     fn resolve_base_indices_finds_joints() {
-        let names: Vec<String> = ["px", "py", "yaw", "arm"]
+        let names: Vec<String> = ["arm", "yaw", "px", "py"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let base_names: Vec<String> = ["px", "py", "yaw"].iter().map(|s| s.to_string()).collect();
         let base = resolve_base_indices(&names, &base_names).unwrap();
-        assert_eq!((base.x, base.y, base.yaw), (0, 1, 2));
+        assert_eq!((base.x, base.y, base.yaw), (2, 3, 1));
     }
 
     #[test]
@@ -88,5 +131,39 @@ mod tests {
         let names: Vec<String> = ["px"].iter().map(|s| s.to_string()).collect();
         let base_names: Vec<String> = ["px", "py", "yaw"].iter().map(|s| s.to_string()).collect();
         assert!(resolve_base_indices(&names, &base_names).is_err());
+    }
+
+    #[test]
+    fn resolve_base_indices_rejects_wrong_count() {
+        let names: Vec<String> = ["px", "py"].iter().map(|s| s.to_string()).collect();
+        assert!(resolve_base_indices(&names, &names).is_err());
+    }
+
+    #[test]
+    fn slip_residuals_returns_one_per_interval() {
+        let traj = vec![
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 0.5, 0.0, 0.0],
+        ];
+        let residuals = slip_residuals(&traj, &base());
+        assert_eq!(residuals.len(), 2);
+        assert!(residuals[0].abs() < 1e-12); // forward along +x
+        assert!((residuals[1] - (-0.5)).abs() < 1e-12); // lateral step
+    }
+
+    #[test]
+    fn summarize_slip_finds_max_and_counts() {
+        let summary = summarize_slip(&[1e-9, -3e-3, 2e-4]);
+        assert!((summary.max_abs - 3e-3).abs() < 1e-15);
+        assert_eq!(summary.max_index, 1);
+        assert_eq!(summary.count_above_tol, 2);
+    }
+
+    #[test]
+    fn summarize_slip_empty_is_clean() {
+        let summary = summarize_slip(&[]);
+        assert_eq!(summary.max_abs, 0.0);
+        assert_eq!(summary.count_above_tol, 0);
     }
 }
