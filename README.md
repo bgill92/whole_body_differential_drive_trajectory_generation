@@ -8,6 +8,13 @@ end-effector path while respecting the base's no-lateral-slip (nonholonomic)
 constraint, and streams the result to the [Rerun](https://rerun.io) viewer for
 3D playback.
 
+![Solved whole-body trajectory playing back in the Rerun viewer](assets/demo.gif)
+
+The solved whole-body trajectory — differential-drive base and UR5e arm
+tracking the end-effector path — rendered with [Rerun](https://rerun.io).
+Regenerate with `python3 scripts/render_demo.py` (needs `rerun` and `ffmpeg`
+on `PATH`).
+
 ## TL;DR
 
 ```bash
@@ -157,6 +164,8 @@ docs/
   qp-sqp-solver-crates.md        # solver crate survey
   rust-best-practices.md         # Rust conventions for this repo
   superpowers/specs/             # design docs (corner rounding, SQP)
+scripts/
+  render_demo.py                 # regenerates assets/demo.gif headlessly
 ```
 
 The mobile base is modeled with three planar joints
