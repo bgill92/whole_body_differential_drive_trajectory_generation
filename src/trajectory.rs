@@ -1,0 +1,1017 @@
+//! Whole-body trajectory optimization: Gauss-Newton SQP over the stacked knot
+//! configurations, one dense Clarabel QP per iteration. See
+//! docs/superpowers/specs/2026-08-14-sqp-trajectory-optimization-design.md.
+
+use crate::configs::{EeTracking, TrajectoryConfig};
+use crate::kinematics::{Kinematics, pose_error_twist};
+use crate::qp;
+
+type DMat = k::nalgebra::DMatrix<f64>;
+type DVec = k::nalgebra::DVector<f64>;
+
+/// Chain indices of the planar base joints.
+struct BaseIndices {
+    x: usize,
+    y: usize,
+    yaw: usize,
+}
+
+/// No-lateral-slip constraint for one knot interval, linearized at the current
+/// configurations: c = sin(θ̄)·Δx − cos(θ̄)·Δy with θ̄ the midpoint heading.
+///
+/// Returns the residual and the six nonzero partials as
+/// (index into the concatenated [q_k ‖ q_k1], value); all other partials are
+/// exactly zero because c involves only the base coordinates.
+fn nonholonomic_linearization(
+    q_k: &[f64],
+    q_k1: &[f64],
+    base: &BaseIndices,
+) -> (f64, [(usize, f64); 6]) {
+    let n = q_k.len();
+    let dx = q_k1[base.x] - q_k[base.x];
+    let dy = q_k1[base.y] - q_k[base.y];
+    let mid_yaw = 0.5 * (q_k[base.yaw] + q_k1[base.yaw]);
+    let (sin_mid, cos_mid) = mid_yaw.sin_cos();
+
+    let residual = sin_mid * dx - cos_mid * dy;
+    // d/dθ̄ (sin θ̄·Δx − cos θ̄·Δy) = cos θ̄·Δx + sin θ̄·Δy, and ∂θ̄/∂θ_k =
+    // ∂θ̄/∂θ_{k+1} = ½, so both yaw partials share this value.
+    let dyaw = 0.5 * (cos_mid * dx + sin_mid * dy);
+    let partials = [
+        (base.x, -sin_mid),
+        (base.y, cos_mid),
+        (base.yaw, dyaw),
+        (n + base.x, sin_mid),
+        (n + base.y, -cos_mid),
+        (n + base.yaw, dyaw),
+    ];
+    (residual, partials)
+}
+
+/// Forward progress of the base over one knot interval, linearized at the
+/// current configurations: s = cos(θ̄)·Δx + sin(θ̄)·Δy with θ̄ the midpoint
+/// heading — the longitudinal counterpart of `nonholonomic_linearization`
+/// (s = v·dt when the no-slip constraint holds; negative s is reverse motion).
+///
+/// Same return convention: the value and the six nonzero partials as
+/// (index into the concatenated [q_k ‖ q_k1], value).
+fn forward_progress_linearization(
+    q_k: &[f64],
+    q_k1: &[f64],
+    base: &BaseIndices,
+) -> (f64, [(usize, f64); 6]) {
+    let n = q_k.len();
+    let dx = q_k1[base.x] - q_k[base.x];
+    let dy = q_k1[base.y] - q_k[base.y];
+    let mid_yaw = 0.5 * (q_k[base.yaw] + q_k1[base.yaw]);
+    let (sin_mid, cos_mid) = mid_yaw.sin_cos();
+
+    let progress = cos_mid * dx + sin_mid * dy;
+    // d/dθ̄ (cos θ̄·Δx + sin θ̄·Δy) = −sin θ̄·Δx + cos θ̄·Δy, and ∂θ̄/∂θ_k =
+    // ∂θ̄/∂θ_{k+1} = ½, so both yaw partials share this value.
+    let dyaw = 0.5 * (-sin_mid * dx + cos_mid * dy);
+    let partials = [
+        (base.x, -cos_mid),
+        (base.y, -sin_mid),
+        (base.yaw, dyaw),
+        (n + base.x, cos_mid),
+        (n + base.y, sin_mid),
+        (n + base.yaw, dyaw),
+    ];
+    (progress, partials)
+}
+
+/// Elementwise block accumulation; avoids relying on slice AddAssign support
+/// in the old nalgebra shipped through the k crate.
+fn add_block(p: &mut DMat, row0: usize, col0: usize, block: &DMat) {
+    for r in 0..block.nrows() {
+        for c in 0..block.ncols() {
+            p[(row0 + r, col0 + c)] += block[(r, c)];
+        }
+    }
+}
+
+fn resolve_base_indices(
+    joint_names: &[String],
+    base_joint_names: &[String],
+) -> Result<BaseIndices, String> {
+    if base_joint_names.len() != 3 {
+        return Err(format!(
+            "base_joint_names must list exactly [x, y, yaw], got {} entries",
+            base_joint_names.len()
+        ));
+    }
+    let mut indices = [0usize; 3];
+    for (slot, name) in base_joint_names.iter().enumerate() {
+        indices[slot] = joint_names
+            .iter()
+            .position(|joint| joint == name)
+            .ok_or_else(|| format!("base joint '{name}' not in serial chain"))?;
+    }
+    Ok(BaseIndices {
+        x: indices[0],
+        y: indices[1],
+        yaw: indices[2],
+    })
+}
+
+/// ℓ1 exact-penalty merit: tracking + smoothness costs plus a penalty on
+/// nonlinear constraint violation. Used only to accept/reject SQP steps —
+/// the QP itself never sees it.
+// ponytail: fixed penalty weight; exactness needs it above the largest
+// constraint multiplier, upgrade to adaptive nu if a case ever beats 1e4.
+const MERIT_PENALTY: f64 = 1e4;
+
+// The argument list mirrors sqp_step's (same subproblem context); bundling
+// into a struct would obscure it.
+#[allow(clippy::too_many_arguments)]
+fn merit(
+    knots: &[DVec],
+    goal_poses: &[k::Isometry3<f64>],
+    kinematics: &mut Kinematics,
+    config: &TrajectoryConfig,
+    base: &BaseIndices,
+) -> f64 {
+    let num_knots = knots.len();
+    let n = knots[0].len();
+    let hard = matches!(config.ee_tracking, EeTracking::Hard);
+    let velocity_limit = config.max_joint_velocity * config.dt;
+
+    let mut total = 0.0;
+
+    // EE term: a smooth cost in soft mode (it IS the objective there), an
+    // exact-penalty term in hard mode (EE is a constraint there).
+    for (knot, goal) in knots.iter().zip(goal_poses) {
+        kinematics.set_positions(knot.as_slice());
+        let residual = pose_error_twist(&goal.to_homogeneous(), &kinematics.end_pose());
+        if hard {
+            total += MERIT_PENALTY * residual.iter().map(|v| v.abs()).sum::<f64>();
+        } else {
+            total += 0.5 * config.ee_weight * residual.norm_squared();
+        }
+    }
+
+    // Smoothness cost, matching sqp_step's quadratic exactly.
+    for k in 0..num_knots.saturating_sub(1) {
+        let mut sum_sq = 0.0;
+        // Both knots[k] and knots[k + 1] are indexed by j, so an
+        // iterator/enumerate rewrite would not actually simplify this.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let difference = knots[k + 1][j] - knots[k][j];
+            sum_sq += difference * difference;
+        }
+        total += 0.5 * config.smoothness_weight * sum_sq;
+    }
+
+    // Penalty on nonlinear constraint violation: no-slip (always) and joint
+    // velocity limits (always — soft-mode velocity rows are also progressive
+    // there, so the merit must judge against the real limit, not the
+    // step-local budget).
+    for k in 0..num_knots.saturating_sub(1) {
+        let (residual, _) =
+            nonholonomic_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+        total += MERIT_PENALTY * residual.abs();
+        // One-sided backward-motion cost; matches sqp_step's Gauss-Newton
+        // model of ½·w·min(s, 0)².
+        let (progress, _) =
+            forward_progress_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+        total += 0.5 * config.backward_weight * progress.min(0.0).powi(2);
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let difference = (knots[k + 1][j] - knots[k][j]).abs();
+            total += MERIT_PENALTY * (difference - velocity_limit).max(0.0);
+        }
+    }
+
+    total
+}
+
+/// Assemble and solve one SQP subproblem at the current iterate; returns the
+/// stacked step ΔQ. Cost convention: min ½ΔᵀPΔ + qᵀΔ with P = w_ee·JᵀJ blocks
+/// (soft mode) + smoothness difference operator + damping·I.
+// The argument list mirrors the QP subproblem's mathematical structure (same
+// rationale as qp::solve); bundling into a struct would obscure it.
+#[allow(clippy::too_many_arguments)]
+fn sqp_step(
+    knots: &[DVec],
+    goal_poses: &[k::Isometry3<f64>],
+    kinematics: &mut Kinematics,
+    config: &TrajectoryConfig,
+    base: &BaseIndices,
+    lower: &DVec,
+    upper: &DVec,
+    // Trust-region radius for this attempt; the caller adapts it via the
+    // merit-function accept/reject loop, so it is passed separately from
+    // `config.trust_region` (the starting/maximum radius).
+    trust_region: f64,
+    // Scales every linearized equality rhs toward zero (JΔ = α·target
+    // instead of JΔ = target): nonholonomic no-slip AND, in hard mode, EE
+    // pose rows. Shrinking α asks for less correction per step rather than
+    // the full amount, enlarging the feasible set when the full target
+    // conflicts with the trust region or velocity rows. This is a homotopy,
+    // not a slip license: the SQP fixed point still forces exact constraint
+    // satisfaction, since Δ = 0 solving the QP requires α·c = 0, i.e. c = 0
+    // whenever α ≠ 0.
+    equality_scale: f64,
+) -> Result<DVec, String> {
+    let num_knots = knots.len();
+    let n = lower.len();
+    let dim = num_knots * n;
+    let num_intervals = num_knots - 1;
+
+    // Per-knot pose error twists and Jacobians at the current iterate.
+    let mut residuals = Vec::with_capacity(num_knots);
+    let mut jacobians = Vec::with_capacity(num_knots);
+    for (knot, goal) in knots.iter().zip(goal_poses) {
+        kinematics.set_positions(knot.as_slice());
+        residuals.push(pose_error_twist(
+            &goal.to_homogeneous(),
+            &kinematics.end_pose(),
+        ));
+        if residuals.last().unwrap().iter().any(|v| !v.is_finite()) {
+            return Err(format!(
+                "non-finite pose residual at knot {}; goal or configuration is degenerate",
+                residuals.len() - 1
+            ));
+        }
+        jacobians.push(kinematics.jacobian());
+    }
+
+    let mut p = DMat::zeros(dim, dim);
+    let mut q_lin = DVec::zeros(dim);
+
+    // EE tracking cost (soft mode only; hard mode uses equality rows below).
+    if matches!(config.ee_tracking, EeTracking::Soft) {
+        for k in 0..num_knots {
+            let jt = jacobians[k].transpose();
+            add_block(
+                &mut p,
+                k * n,
+                k * n,
+                &(config.ee_weight * (&jt * &jacobians[k])),
+            );
+            let residual = DVec::from_vec(residuals[k].as_slice().to_vec());
+            let gradient = config.ee_weight * (&jt * residual);
+            for j in 0..n {
+                q_lin[k * n + j] -= gradient[j];
+            }
+        }
+    }
+
+    // Smoothness on consecutive differences d_k = q_{k+1} − q_k: quadratic in
+    // ΔQ through the first-difference operator, linear term from current d_k.
+    let identity = DMat::identity(n, n);
+    for k in 0..num_intervals {
+        let w = config.smoothness_weight;
+        add_block(&mut p, k * n, k * n, &(w * &identity));
+        add_block(&mut p, (k + 1) * n, (k + 1) * n, &(w * &identity));
+        add_block(&mut p, k * n, (k + 1) * n, &(-w * &identity));
+        add_block(&mut p, (k + 1) * n, k * n, &(-w * &identity));
+        for j in 0..n {
+            let difference = knots[k + 1][j] - knots[k][j];
+            q_lin[k * n + j] -= w * difference;
+            q_lin[(k + 1) * n + j] += w * difference;
+        }
+    }
+
+    // Backward-motion penalty ½·w·min(s, 0)², handled Gauss-Newton style:
+    // intervals currently reversing (s < 0) contribute w·ggᵀ to P and w·s·g
+    // to q with g = ∇s; forward intervals contribute nothing. The cost is C¹
+    // at s = 0, so intervals flipping in/out of the active set between
+    // iterations stay merit-consistent.
+    if config.backward_weight > 0.0 {
+        for k in 0..num_intervals {
+            let (progress, partials) =
+                forward_progress_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+            if progress < 0.0 {
+                let w = config.backward_weight;
+                for (row_offset, row_value) in partials {
+                    for (col_offset, col_value) in partials {
+                        p[(k * n + row_offset, k * n + col_offset)] += w * row_value * col_value;
+                    }
+                    q_lin[k * n + row_offset] += w * progress * row_value;
+                }
+            }
+        }
+    }
+
+    // Damping keeps P positive definite even where J loses rank.
+    for i in 0..dim {
+        p[(i, i)] += config.damping;
+    }
+
+    // Equalities: one linearized no-slip row per interval, plus (hard mode)
+    // six linearized EE pose rows per knot.
+    let hard = matches!(config.ee_tracking, EeTracking::Hard);
+    let m_eq = num_intervals + if hard { 6 * num_knots } else { 0 };
+    let mut a_eq = DMat::zeros(m_eq, dim);
+    let mut b_eq = DVec::zeros(m_eq);
+    for k in 0..num_intervals {
+        let (residual, partials) =
+            nonholonomic_linearization(knots[k].as_slice(), knots[k + 1].as_slice(), base);
+        for (offset, value) in partials {
+            a_eq[(k, k * n + offset)] = value;
+        }
+        b_eq[k] = equality_scale * -residual;
+    }
+    if hard {
+        for k in 0..num_knots {
+            let row0 = num_intervals + 6 * k;
+            a_eq.slice_mut((row0, k * n), (6, n))
+                .copy_from(&jacobians[k]);
+            for axis in 0..6 {
+                b_eq[row0 + axis] = equality_scale * residuals[k][axis];
+            }
+        }
+    }
+
+    // Velocity limits: |d_k + (Δ_{k+1} − Δ_k)| ≤ v_max·dt, two rows per joint
+    // per interval over ΔQ.
+    let hard_budget = config.max_joint_velocity * config.dt;
+    let m_in = 2 * n * num_intervals;
+    let mut a_in = DMat::zeros(m_in, dim);
+    let mut b_in = DVec::zeros(m_in);
+    for k in 0..num_intervals {
+        for j in 0..n {
+            let difference = knots[k + 1][j] - knots[k][j];
+            // Where the current iterate already violates the velocity limit
+            // by more than one trust-region step, tighten progressively
+            // (one trust-region step per SQP iteration) instead of handing
+            // Clarabel an empty feasible set; the configured limit is
+            // enforced wherever it is reachable this iteration.
+            let budget = (difference.abs() - trust_region).max(hard_budget);
+            let upper_row = 2 * (k * n + j);
+            a_in[(upper_row, (k + 1) * n + j)] = 1.0;
+            a_in[(upper_row, k * n + j)] = -1.0;
+            b_in[upper_row] = budget - difference;
+            let lower_row = upper_row + 1;
+            a_in[(lower_row, (k + 1) * n + j)] = -1.0;
+            a_in[(lower_row, k * n + j)] = 1.0;
+            b_in[lower_row] = budget + difference;
+        }
+    }
+
+    // Box: joint limits re-anchored at the iterate, intersected with the
+    // trust region.
+    let mut lb = DVec::zeros(dim);
+    let mut ub = DVec::zeros(dim);
+    for k in 0..num_knots {
+        for j in 0..n {
+            lb[k * n + j] = (lower[j] - knots[k][j]).max(-trust_region);
+            ub[k * n + j] = (upper[j] - knots[k][j]).min(trust_region);
+        }
+    }
+
+    qp::solve(&p, &q_lin, &a_eq, &b_eq, &a_in, &b_in, &lb, &ub)
+}
+
+/// Optimize the whole trajectory with Gauss-Newton SQP. `warm_start` is one
+/// joint configuration per goal pose (from the sequential IK); the return
+/// value has the same shape and feeds `log_trajectory` directly.
+///
+/// Non-convergence within `sqp_max_iterations` returns the last iterate (like
+/// the IK loop); infeasibility (possible in hard mode) is an error.
+pub fn optimize(
+    goal_poses: &[k::Isometry3<f64>],
+    kinematics: &mut Kinematics,
+    config: &TrajectoryConfig,
+    warm_start: &[Vec<f64>],
+) -> Result<Vec<Vec<f64>>, String> {
+    let joint_names = kinematics.joint_names();
+    let n = joint_names.len();
+    if goal_poses.len() < 2 {
+        return Err("trajectory optimization needs at least 2 knots".to_string());
+    }
+    if warm_start.len() != goal_poses.len() {
+        return Err(format!(
+            "warm start has {} knots but the path has {}",
+            warm_start.len(),
+            goal_poses.len()
+        ));
+    }
+    if warm_start.iter().any(|knot| knot.len() != n) {
+        return Err("warm-start knot dimension does not match the chain".to_string());
+    }
+    if config.dt <= 0.0 || config.trust_region <= 0.0 || config.damping <= 0.0 {
+        return Err("trajectory dt, trust_region, and damping must be > 0".to_string());
+    }
+    // Negative weights make P indefinite (JᵀJ and the smoothness Laplacian
+    // are only guaranteed PSD with a nonnegative coefficient); a nonpositive
+    // velocity budget makes every interval's inequality rows infeasible.
+    if config.ee_weight < 0.0 || config.smoothness_weight < 0.0 || config.backward_weight < 0.0 {
+        return Err(
+            "trajectory ee_weight, smoothness_weight, and backward_weight must be >= 0".to_string(),
+        );
+    }
+    if config.max_joint_velocity <= 0.0 {
+        return Err("trajectory max_joint_velocity must be > 0".to_string());
+    }
+    let base = resolve_base_indices(&joint_names, &config.base_joint_names)?;
+    let (lower, upper) = kinematics.joint_limits();
+
+    let mut knots: Vec<DVec> = warm_start
+        .iter()
+        .map(|knot| {
+            // An out-of-limits warm start would make the box lb > ub for
+            // that variable, surfacing as an opaque QP infeasibility rather
+            // than the actual cause.
+            let mut positions = DVec::from_vec(knot.clone());
+            for j in 0..n {
+                positions[j] = positions[j].clamp(lower[j], upper[j]);
+            }
+            positions
+        })
+        .collect();
+
+    // Trust-region radius, adapted by the merit accept/reject loop below:
+    // grows toward the configured value on acceptance, shrinks on rejection.
+    let mut trust_region = config.trust_region;
+    let mut current_merit = merit(&knots, goal_poses, kinematics, config, &base);
+    let mut converged = false;
+    // Distinguishes why the loop ended, for the non-convergence message
+    // below: exhausting sqp_max_iterations is a different situation from the
+    // trust region collapsing (a merit-local point the quadratic model can't
+    // improve on at any radius). Some(iteration) records where it stalled.
+    let mut stalled: Option<usize> = None;
+    // Set when the QP solver itself gave up mid-run after at least one
+    // accepted step; the loop then returns the best iterate so far.
+    let mut solver_stopped: Option<(usize, String)> = None;
+    let mut accepted_any = false;
+    for iteration in 0..config.sqp_max_iterations {
+        // Equality-relaxation retry loop, used in both modes: shrink the
+        // demanded correction (not the trust region — shrinking the box
+        // only ever shrinks the feasible set and can never rescue an
+        // infeasible subproblem) when the full-target subproblem is
+        // infeasible, e.g. near a kinematic singularity or a tight velocity
+        // budget. Four halvings spans a 16x range — beyond that the iterate
+        // is genuinely stuck and the error is real.
+        let mut alpha = 1.0;
+        let mut step = None;
+        let mut last_error = String::new();
+        // ponytail: rejected iterations redo per-knot FK/Jacobians for
+        // unchanged knots; cache them per outer iteration if profiling ever
+        // cares.
+        for _ in 0..=4 {
+            match sqp_step(
+                &knots,
+                goal_poses,
+                kinematics,
+                config,
+                &base,
+                &lower,
+                &upper,
+                trust_region,
+                alpha,
+            ) {
+                Ok(s) => {
+                    step = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last_error = e;
+                    alpha *= 0.5;
+                }
+            }
+        }
+        let Some(step) = step else {
+            let hint = if matches!(config.ee_tracking, EeTracking::Hard) {
+                "; ee_tracking: hard can conflict with base kinematics — try soft"
+            } else {
+                ""
+            };
+            // A solver failure before any accepted step means the problem is
+            // wrong (infeasible or degenerate) — error. After progress has
+            // been made, the iterate is a valid clamped trajectory and a
+            // mid-run stall (e.g. Clarabel InsufficientProgress on large
+            // dense subproblems) degrades to best-effort, matching the
+            // non-convergence policy instead of discarding the progress.
+            if !accepted_any {
+                return Err(format!("sqp iteration {iteration}: {last_error}{hint}"));
+            }
+            solver_stopped = Some((iteration, last_error));
+            break;
+        };
+
+        let mut step_norm: f64 = 0.0;
+        let mut candidate = knots.clone();
+        for k in 0..candidate.len() {
+            for j in 0..n {
+                let delta = step[k * n + j];
+                step_norm = step_norm.max(delta.abs());
+                // Same clamp rationale as the IK loop: interior-point steps
+                // are feasible to tolerance, hard limits must hold exactly.
+                candidate[k][j] = (candidate[k][j] + delta).clamp(lower[j], upper[j]);
+            }
+        }
+
+        // Merit-based accept/reject: plain step acceptance limit-cycled on
+        // L-shaped paths (full-radius steps oscillating around the no-slip
+        // manifold instead of damping down). Accepting only steps that
+        // actually improve the ℓ1 exact-penalty merit — and shrinking the
+        // trust region when they don't — turns this into a real
+        // trust-region method instead of a fixed-step Gauss-Newton iteration.
+        // Relative margin: 1e-12 absolute is below f64 ULP at hard-mode merit
+        // magnitudes (~1e4 from the exact-penalty terms), so an absolute
+        // threshold would spuriously accept non-improving steps there.
+        let candidate_merit = merit(&candidate, goal_poses, kinematics, config, &base);
+        if candidate_merit <= current_merit - 1e-12 * current_merit.max(1.0) {
+            accepted_any = true;
+            knots = candidate;
+            current_merit = candidate_merit;
+            trust_region = (2.0 * trust_region).min(config.trust_region);
+            // A relaxed-target step can be small without meaning converged:
+            // it only satisfied a scaled-down target, not the real one.
+            if alpha >= 1.0 && step_norm < config.convergence_step_norm {
+                converged = true;
+                break;
+            }
+        } else {
+            // A full-target step the merit can't improve on is a fixed
+            // point, not a stall: check convergence before shrinking, or a
+            // legitimately converged iterate gets misreported as stalled.
+            if alpha >= 1.0 && step_norm < config.convergence_step_norm {
+                converged = true;
+                break;
+            }
+            // Rejected: the quadratic model over-promised at this radius.
+            trust_region *= 0.5;
+            if trust_region < config.trust_region / 64.0 {
+                stalled = Some(iteration);
+                break;
+            }
+        }
+    }
+
+    if !converged {
+        // The spec promises a stderr signal for best-effort returns; hard
+        // mode can finish on a relaxed step with EE targets only partially
+        // met, so silence here would hide real tracking error. Distinguish
+        // why: exhausting the iteration budget is fixable by raising
+        // sqp_max_iterations, while a collapsed trust region means the
+        // merit landscape itself is stuck at this radius floor.
+        match (solver_stopped, stalled) {
+            (Some((iteration, error)), _) => eprintln!(
+                "trajectory optimization: solver stopped at iteration {iteration} ({error}); returning last iterate"
+            ),
+            (None, Some(iteration)) => eprintln!(
+                "trajectory optimization: trust region collapsed after {} iterations; returning last iterate",
+                iteration + 1
+            ),
+            (None, None) => eprintln!(
+                "trajectory optimization did not converge within {} iterations; returning last iterate",
+                config.sqp_max_iterations
+            ),
+        }
+    }
+
+    // The progressive velocity budget only guarantees the configured limit
+    // where it is reachable within sqp_max_iterations; on a sharp enough
+    // corner it may not fully tighten in time. `converged` alone does not
+    // catch this (a relaxed budget can converge in step-norm while still
+    // exceeding the real limit), so check the final trajectory directly
+    // instead of silently returning a limit violation.
+    let mut max_velocity: f64 = 0.0;
+    for k in 0..knots.len().saturating_sub(1) {
+        // Both knots[k] and knots[k + 1] are indexed by j, so an
+        // iterator/enumerate rewrite would not actually simplify this.
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..n {
+            let velocity = (knots[k + 1][j] - knots[k][j]).abs() / config.dt;
+            max_velocity = max_velocity.max(velocity);
+        }
+    }
+    if max_velocity > config.max_joint_velocity + 1e-6 {
+        eprintln!(
+            "trajectory optimization: final joint velocity {max_velocity} exceeds the configured limit {}",
+            config.max_joint_velocity
+        );
+    }
+
+    Ok(knots
+        .into_iter()
+        .map(|knot| knot.as_slice().to_vec())
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Central finite differences over every entry of [q_k ‖ q_k1] must match
+    // the analytic partials; entries not in the partial list must have zero
+    // finite-difference gradient.
+    #[test]
+    fn nonholonomic_linearization_matches_finite_differences() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        let q_k = [0.3, -0.2, 0.7, 0.1];
+        let q_k1 = [0.6, 0.1, 1.1, -0.4];
+
+        let (_, partials) = nonholonomic_linearization(&q_k, &q_k1, &base);
+        let mut analytic = [0.0; 8];
+        for (index, value) in partials {
+            analytic[index] = value;
+        }
+
+        let eps = 1e-6;
+        for i in 0..8 {
+            let mut plus = [q_k, q_k1].concat();
+            let mut minus = plus.clone();
+            plus[i] += eps;
+            minus[i] -= eps;
+            let c_plus = nonholonomic_linearization(&plus[..4], &plus[4..], &base).0;
+            let c_minus = nonholonomic_linearization(&minus[..4], &minus[4..], &base).0;
+            let fd = (c_plus - c_minus) / (2.0 * eps);
+            assert!(
+                (fd - analytic[i]).abs() < 1e-6,
+                "partial {i}: finite difference {fd} vs analytic {}",
+                analytic[i]
+            );
+        }
+    }
+
+    // Central finite differences over every entry of [q_k ‖ q_k1] must match
+    // the analytic partials of the forward-progress function.
+    #[test]
+    fn forward_progress_linearization_matches_finite_differences() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        let q_k = [0.3, -0.2, 0.7, 0.1];
+        let q_k1 = [0.6, 0.1, 1.1, -0.4];
+
+        let (_, partials) = forward_progress_linearization(&q_k, &q_k1, &base);
+        let mut analytic = [0.0; 8];
+        for (index, value) in partials {
+            analytic[index] = value;
+        }
+
+        let eps = 1e-6;
+        for i in 0..8 {
+            let mut plus = [q_k, q_k1].concat();
+            let mut minus = plus.clone();
+            plus[i] += eps;
+            minus[i] -= eps;
+            let s_plus = forward_progress_linearization(&plus[..4], &plus[4..], &base).0;
+            let s_minus = forward_progress_linearization(&minus[..4], &minus[4..], &base).0;
+            let fd = (s_plus - s_minus) / (2.0 * eps);
+            assert!(
+                (fd - analytic[i]).abs() < 1e-6,
+                "partial {i}: finite difference {fd} vs analytic {}",
+                analytic[i]
+            );
+        }
+    }
+
+    // Forward motion along the heading must read +1, reverse motion -1.
+    #[test]
+    fn forward_progress_semantics() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        let (s, _) = forward_progress_linearization(&[0.0, 0.0, 0.0], &[1.0, 0.0, 0.0], &base);
+        assert!((s - 1.0).abs() < 1e-12, "forward motion progress: {s}");
+        let (s, _) = forward_progress_linearization(&[1.0, 0.0, 0.0], &[0.0, 0.0, 0.0], &base);
+        assert!((s + 1.0).abs() < 1e-12, "reverse motion progress: {s}");
+    }
+
+    // A pure-forward motion (heading exactly along the displacement) must
+    // satisfy the constraint; a pure-sideways one must violate it maximally.
+    #[test]
+    fn nonholonomic_residual_semantics() {
+        let base = BaseIndices { x: 0, y: 1, yaw: 2 };
+        // Heading 0, moving +x: no slip.
+        let (c, _) = nonholonomic_linearization(&[0.0, 0.0, 0.0], &[1.0, 0.0, 0.0], &base);
+        assert!(c.abs() < 1e-12, "forward motion flagged as slip: {c}");
+        // Heading 0, moving +y: full lateral slip of magnitude 1.
+        let (c, _) = nonholonomic_linearization(&[0.0, 0.0, 0.0], &[0.0, 1.0, 0.0], &base);
+        assert!(
+            (c.abs() - 1.0).abs() < 1e-12,
+            "lateral motion residual: {c}"
+        );
+    }
+
+    use crate::configs::{DifferentialIkConfig, EeTracking, TrajectoryConfig};
+    use crate::kinematics::{Kinematics, differential_ik, pose_error_twist};
+    use k::nalgebra::{Isometry3, UnitQuaternion, Vector3};
+
+    fn base_names() -> Vec<String> {
+        vec![
+            "world_base_link_planar_prismatic_x".to_string(),
+            "world_base_link_planar_prismatic_y".to_string(),
+            "world_base_link_planar_yaw".to_string(),
+        ]
+    }
+
+    fn test_config(ee_tracking: EeTracking) -> TrajectoryConfig {
+        TrajectoryConfig {
+            enabled: true,
+            dt: 0.5,
+            ee_tracking,
+            ee_weight: 100.0,
+            smoothness_weight: 1.0,
+            backward_weight: 0.0,
+            max_joint_velocity: 2.0,
+            sqp_max_iterations: 50,
+            trust_region: 0.2,
+            convergence_step_norm: 1e-5,
+            damping: 1e-3,
+            base_joint_names: base_names(),
+        }
+    }
+
+    // Downward-facing EE poses along +x, matching the shipped config's
+    // orientation convention.
+    fn straight_goals(count: usize, spacing: f64) -> Vec<Isometry3<f64>> {
+        (0..count)
+            .map(|i| {
+                Isometry3::from_parts(
+                    Vector3::new(0.8 + spacing * i as f64, 0.5, 0.9).into(),
+                    UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0),
+                )
+            })
+            .collect()
+    }
+
+    // Downward-facing EE poses tracing a 90° corner: three knots along +x,
+    // then two knots along +y from the last x knot.
+    fn l_shaped_goals() -> Vec<Isometry3<f64>> {
+        let corner = UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0);
+        [(0.8, 0.5), (0.9, 0.5), (1.0, 0.5), (1.0, 0.6), (1.0, 0.7)]
+            .into_iter()
+            .map(|(x, y)| Isometry3::from_parts(Vector3::new(x, y, 0.9).into(), corner))
+            .collect()
+    }
+
+    fn test_kinematics() -> Kinematics {
+        Kinematics::build("assets/rox_diff_ur5e.urdf", "ur5ewrist_3_joint")
+            .expect("failed to build kinematics")
+    }
+
+    // Sequential IK, exactly like main's warm-start loop.
+    fn warm_start(kinematics: &mut Kinematics, goals: &[Isometry3<f64>]) -> Vec<Vec<f64>> {
+        let ik = DifferentialIkConfig {
+            num_steps: 50,
+            damping_factor: 0.5,
+            convergence_threshold: 0.01,
+            equality_constraints: vec![],
+        };
+        goals
+            .iter()
+            .map(|goal| {
+                differential_ik(goal, kinematics, &ik)
+                    .expect("warm-start IK failed")
+                    .pop()
+                    .expect("trajectory is never empty")
+            })
+            .collect()
+    }
+
+    fn base_indices(kinematics: &Kinematics) -> BaseIndices {
+        let names = kinematics.joint_names();
+        let find = |name: &str| names.iter().position(|n| n == name).unwrap();
+        BaseIndices {
+            x: find("world_base_link_planar_prismatic_x"),
+            y: find("world_base_link_planar_prismatic_y"),
+            yaw: find("world_base_link_planar_yaw"),
+        }
+    }
+
+    #[test]
+    fn soft_mode_removes_lateral_slip_within_limits() {
+        let mut kinematics = test_kinematics();
+        let goals = straight_goals(4, 0.15);
+        let start = warm_start(&mut kinematics, &goals);
+        let config = test_config(EeTracking::Soft);
+
+        let optimized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        assert_eq!(optimized.len(), goals.len());
+
+        let base = base_indices(&kinematics);
+        let (lower, upper) = kinematics.joint_limits();
+        let n = lower.len();
+        let mut ee_error_sum = 0.0;
+        for k in 0..optimized.len() {
+            // (b) Joint limits and velocity limits hold at every knot/interval.
+            for j in 0..n {
+                assert!(
+                    optimized[k][j] >= lower[j] - 1e-9 && optimized[k][j] <= upper[j] + 1e-9,
+                    "joint {j} out of limits at knot {k}"
+                );
+            }
+            if k + 1 < optimized.len() {
+                // Both optimized[k] and optimized[k + 1] are indexed by j, so
+                // an iterator/enumerate rewrite would not actually simplify
+                // this.
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..n {
+                    let velocity = (optimized[k + 1][j] - optimized[k][j]).abs() / config.dt;
+                    assert!(
+                        velocity <= config.max_joint_velocity + 1e-6,
+                        "joint {j} velocity {velocity} exceeds limit at interval {k}"
+                    );
+                }
+                // (a) No lateral slip after convergence.
+                let (residual, _) =
+                    nonholonomic_linearization(&optimized[k], &optimized[k + 1], &base);
+                assert!(
+                    residual.abs() < 1e-6,
+                    "lateral slip {residual} at interval {k}"
+                );
+            }
+            // (c) EE tracking stays reasonable (it cannot beat the
+            // unconstrained warm start; it must not collapse either).
+            kinematics.set_positions(&optimized[k]);
+            let twist = pose_error_twist(&goals[k].to_homogeneous(), &kinematics.end_pose());
+            ee_error_sum += twist.norm();
+        }
+        let mean_ee_error = ee_error_sum / optimized.len() as f64;
+        assert!(
+            mean_ee_error < 0.25,
+            "mean EE tracking error too large: {mean_ee_error}"
+        );
+
+        // Smoothness sign: a flipped linear term would bias the SQP toward
+        // *larger* consecutive differences instead of penalizing them, so
+        // the optimized trajectory must not be less smooth than warm start.
+        let sum_sq_diff = |trajectory: &[Vec<f64>]| -> f64 {
+            (0..trajectory.len() - 1)
+                .map(|k| {
+                    (0..n)
+                        .map(|j| (trajectory[k + 1][j] - trajectory[k][j]).powi(2))
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let warm_start_smoothness = sum_sq_diff(&start);
+        let optimized_smoothness = sum_sq_diff(&optimized);
+        assert!(
+            optimized_smoothness <= warm_start_smoothness + 1e-9,
+            "optimized trajectory less smooth than warm start: {optimized_smoothness} > {warm_start_smoothness}"
+        );
+    }
+
+    // A 90° corner puts the warm-start joint jump between the corner knots
+    // beyond budget + 2*trust_region, making the naive iteration-0
+    // subproblem infeasible. The progressive velocity budget must let the
+    // optimizer spread the turn across knots instead of erroring.
+    #[test]
+    fn l_shaped_path_respects_velocity_limits() {
+        let mut kinematics = test_kinematics();
+        let goals = l_shaped_goals();
+        let start = warm_start(&mut kinematics, &goals);
+        let mut config = test_config(EeTracking::Soft);
+        config.sqp_max_iterations = 60;
+
+        let optimized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+
+        let base = base_indices(&kinematics);
+        let (lower, upper) = kinematics.joint_limits();
+        let n = lower.len();
+        for k in 0..optimized.len() {
+            for j in 0..n {
+                assert!(
+                    optimized[k][j] >= lower[j] - 1e-9 && optimized[k][j] <= upper[j] + 1e-9,
+                    "joint {j} out of limits at knot {k}"
+                );
+            }
+            if k + 1 < optimized.len() {
+                let (residual, _) =
+                    nonholonomic_linearization(&optimized[k], &optimized[k + 1], &base);
+                assert!(
+                    residual.abs() < 1e-6,
+                    "lateral slip {residual} at interval {k}"
+                );
+                #[allow(clippy::needless_range_loop)]
+                for j in 0..n {
+                    let velocity = (optimized[k + 1][j] - optimized[k][j]).abs() / config.dt;
+                    assert!(
+                        velocity <= config.max_joint_velocity + 1e-6,
+                        "joint {j} velocity {velocity} exceeds limit at interval {k}"
+                    );
+                }
+            }
+        }
+    }
+
+    // (d) Hard mode on a reachable straight path solves and also kills slip.
+    #[test]
+    fn hard_mode_solves_reachable_path() {
+        let mut kinematics = test_kinematics();
+        let goals = straight_goals(3, 0.1);
+        let start = warm_start(&mut kinematics, &goals);
+        let config = test_config(EeTracking::Hard);
+
+        let optimized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        let base = base_indices(&kinematics);
+        for k in 0..optimized.len() - 1 {
+            let (residual, _) = nonholonomic_linearization(&optimized[k], &optimized[k + 1], &base);
+            assert!(residual.abs() < 1e-6, "slip {residual} at interval {k}");
+        }
+        // Hard-row sign: JΔ = r (not -r) must drive the EE pose to the goal,
+        // not away from it.
+        for (k, knot) in optimized.iter().enumerate() {
+            kinematics.set_positions(knot);
+            let twist = pose_error_twist(&goals[k].to_homogeneous(), &kinematics.end_pose());
+            assert!(
+                twist.norm() < 0.05,
+                "hard-mode EE error {} too large at knot {k}",
+                twist.norm()
+            );
+        }
+    }
+
+    // (d) Hard EE rows + a velocity budget too small to reach the next goal
+    // must surface as an infeasibility error, not a panic or silent result.
+    #[test]
+    fn hard_mode_infeasible_velocity_budget_errors() {
+        let mut kinematics = test_kinematics();
+        let goals = straight_goals(3, 0.5);
+        let start = warm_start(&mut kinematics, &goals);
+        let mut config = test_config(EeTracking::Hard);
+        // Deliberately conflicting: exact EE poses per knot, but joints may
+        // move at most 0.001·0.5 per interval while consecutive warm-start
+        // knots differ far more than that.
+        config.max_joint_velocity = 0.001;
+
+        // Force intervals to actually need motion: perturb the warm start so
+        // knot 1 and 2 start from knot 0's configuration.
+        let perturbed: Vec<Vec<f64>> = vec![start[0].clone(); 3];
+        let result = optimize(&goals, &mut kinematics, &config, &perturbed);
+        assert!(result.is_err(), "expected infeasibility, got Ok");
+        let message = result.unwrap_err();
+        assert!(
+            message.contains("qp_not_solved"),
+            "unexpected error text: {message}"
+        );
+    }
+
+    // Goals receding along -x with the base already pulled forward: with
+    // backward_weight = 0 the optimizer backs the base up along its heading;
+    // a large weight must suppress most of that reverse motion.
+    #[test]
+    fn backward_weight_suppresses_reverse_motion() {
+        let mut kinematics = test_kinematics();
+        let corner = UnitQuaternion::from_euler_angles(std::f64::consts::PI, 0.0, 0.0);
+        let goals: Vec<Isometry3<f64>> = (0..5)
+            .map(|i| {
+                Isometry3::from_parts(Vector3::new(1.2 - 0.15 * i as f64, 0.5, 0.9).into(), corner)
+            })
+            .collect();
+        let start = warm_start(&mut kinematics, &goals);
+        let base = base_indices(&kinematics);
+
+        let backward_total = |trajectory: &[Vec<f64>]| -> f64 {
+            (0..trajectory.len() - 1)
+                .map(|k| {
+                    forward_progress_linearization(&trajectory[k], &trajectory[k + 1], &base)
+                        .0
+                        .min(0.0)
+                        .abs()
+                })
+                .sum()
+        };
+
+        let mut config = test_config(EeTracking::Soft);
+        config.sqp_max_iterations = 100;
+        let unpenalized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        let baseline = backward_total(&unpenalized);
+        assert!(
+            baseline > 0.05,
+            "scenario induces no reverse motion to penalize: {baseline}"
+        );
+
+        config.backward_weight = 1000.0;
+        let penalized = optimize(&goals, &mut kinematics, &config, &start).unwrap();
+        let remaining = backward_total(&penalized);
+        assert!(
+            remaining < 0.25 * baseline,
+            "penalty left {remaining} of {baseline} reverse motion"
+        );
+    }
+
+    #[test]
+    fn validation_errors() {
+        let mut kinematics = test_kinematics();
+        let goals = straight_goals(3, 0.1);
+        let start = warm_start(&mut kinematics, &goals);
+
+        // Unknown base joint name.
+        let mut config = test_config(EeTracking::Soft);
+        config.base_joint_names[0] = "no_such_joint".to_string();
+        assert!(optimize(&goals, &mut kinematics, &config, &start).is_err());
+
+        // Warm start length mismatch.
+        let config = test_config(EeTracking::Soft);
+        assert!(optimize(&goals, &mut kinematics, &config, &start[..2]).is_err());
+
+        // Fewer than two knots.
+        assert!(optimize(&goals[..1], &mut kinematics, &config, &start[..1]).is_err());
+
+        // Non-positive dt.
+        let mut config = test_config(EeTracking::Soft);
+        config.dt = 0.0;
+        assert!(optimize(&goals, &mut kinematics, &config, &start).is_err());
+
+        // Negative backward weight.
+        let mut config = test_config(EeTracking::Soft);
+        config.backward_weight = -1.0;
+        assert!(optimize(&goals, &mut kinematics, &config, &start).is_err());
+    }
+}

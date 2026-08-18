@@ -1,11 +1,14 @@
 urdf_path: assets/rox_diff_ur5e.urdf
-end_joint: ur5ewrist_3_joint
+end_joint: grasp_link_joint
 
 # Waypoint poses in the world frame, linearly interpolated (translation lerp,
 # rotation slerp) into poses_per_segment poses per segment. rpy is
 # roll-pitch-yaw in radians.
 path:
-  poses_per_segment: 10
+  poses_per_segment: 25
+  # Round interior waypoint corners with tangent circular arcs of this
+  # radius (meters); 0 leaves corners sharp. Clamped per corner to fit.
+  corner_radius: 0.1
   # Debug: only solve the first pose of the interpolated path.
   solve_first_pose_only: false
   # Pin base yaw for the first pose so the base x-axis points along the path.
@@ -14,7 +17,9 @@ path:
     - xyz: [1.0, 1.0, 1.0]
       rpy: [3.14159265358979, 0.0, 0.0]
     - xyz: [1.0, -1.0, 1.0]
-      rpy: [3.14159265358979, 0.0, 0.0]
+      rpy: [3.14159265358979, 0.0, -0.78539816339]
+    - xyz: [-1.0, -1.0, 1.0]
+      rpy: [3.14159265358979, 0.0, -1.57079632679]
 
 # Differential IK loop.
 differential_ik:
@@ -27,3 +32,22 @@ differential_ik:
       target_value: -1.57079
     - joint_name: ur5eelbow_joint
       target_value: 1.57079
+
+# Whole-trajectory SQP (Gauss-Newton over Clarabel QPs), warm-started from the
+# sequential IK above. Enforces diff-drive no-lateral-slip, joint velocity
+# limits, and smoothness. ee_tracking: soft (weighted cost) | hard (exact,
+# may be infeasible).
+trajectory:
+  enabled: true
+  dt: 0.5
+  ee_tracking: soft
+  ee_weight: 100.0
+  smoothness_weight: 1.0
+  # One-sided quadratic penalty on backward base motion; 0 allows reversing.
+  backward_weight: 100.0
+  max_joint_velocity: 1.0
+  sqp_max_iterations: 50
+  trust_region: 0.2
+  convergence_step_norm: 1.0e-4
+  damping: 1.0e-3
+  base_joint_names: [world_base_link_planar_prismatic_x, world_base_link_planar_prismatic_y, world_base_link_planar_yaw]

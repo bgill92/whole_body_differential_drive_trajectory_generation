@@ -18,7 +18,10 @@ pub fn se3_log(pose: &k::nalgebra::Matrix4<f64>) -> k::nalgebra::Vector6<f64> {
         k::nalgebra::Rotation3::from_matrix_unchecked(pose.fixed_slice::<3, 3>(0, 0).into_owned());
     let translation = pose.fixed_slice::<3, 1>(0, 3).into_owned();
 
-    let omega = rotation.scaled_axis();
+    // Quaternion extraction (Shepperd's method) is well-conditioned at all
+    // angles including π, where the matrix-log route (acos of a trace that
+    // float drift can push below −1) returns NaN.
+    let omega = k::nalgebra::UnitQuaternion::from_rotation_matrix(&rotation).scaled_axis();
     let theta = omega.norm();
     let omega_hat = omega.cross_matrix();
 
@@ -163,8 +166,8 @@ fn resolve_equality_constraints(
     Ok((a_eq, targets))
 }
 
-/// Body twist [v; omega] taking `current_pose` to `goal_pose`.
-fn pose_error_twist(
+/// Spatial twist [v; omega] taking `current_pose` to `goal_pose`.
+pub(crate) fn pose_error_twist(
     goal_pose: &k::nalgebra::Matrix4<f64>,
     current_pose: &k::Isometry3<f64>,
 ) -> k::nalgebra::Vector6<f64> {
@@ -231,6 +234,8 @@ pub fn differential_ik(
             &q_lin,
             &a_eq,
             &(&eq_targets - &a_eq * &current_joint_positions),
+            &k::nalgebra::DMatrix::zeros(0, n),
+            &k::nalgebra::DVector::zeros(0),
             &(&lower - &current_joint_positions),
             &(&upper - &current_joint_positions),
         )?;
@@ -292,6 +297,24 @@ mod tests {
             Vector3::new(-1.0, 4.0, 0.5).into(),
             UnitQuaternion::from_scaled_axis(Vector3::x() * (std::f64::consts::PI - 1e-4)),
         ));
+    }
+
+    // Exactly-π rotations are the acos-of-trace singularity of the matrix
+    // log; the quaternion route must stay finite and roundtrip.
+    #[test]
+    fn log_roundtrips_at_exactly_pi() {
+        for axis in [Vector3::x(), Vector3::y(), Vector3::z()] {
+            let pose = Isometry3::from_parts(
+                Vector3::new(0.4, -0.2, 1.3).into(),
+                UnitQuaternion::from_scaled_axis(axis * std::f64::consts::PI),
+            );
+            let twist = se3_log(&pose.to_homogeneous());
+            assert!(
+                twist.iter().all(|v| v.is_finite()),
+                "NaN twist for axis {axis:?}"
+            );
+            assert_roundtrip(&pose);
+        }
     }
 
     fn test_kinematics() -> Kinematics {
