@@ -5,7 +5,7 @@ end_joint: grasp_link_joint
 # rotation slerp) into poses_per_segment poses per segment. rpy is
 # roll-pitch-yaw in radians.
 path:
-  poses_per_segment: 25
+  poses_per_segment: 50
   # Round interior waypoint corners with tangent circular arcs of this
   # radius (meters); 0 leaves corners sharp. Clamped per corner to fit.
   corner_radius: 0.1
