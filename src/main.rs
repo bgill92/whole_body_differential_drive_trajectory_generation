@@ -73,6 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Whole-trajectory SQP pass, warm-started from the sequential IK result.
     // Skipped in first-pose debug mode: the optimizer needs every knot.
+    let mut sqp_ran = false;
     if let Some(trajectory_config) = &config.trajectory
         && trajectory_config.enabled
     {
@@ -85,6 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trajectory_config,
                 &joint_positions,
             )?;
+            sqp_ran = true;
         }
     }
 
@@ -104,9 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut kinematics,
         &base_joint_names,
     )?;
-    // The SQP pass replaced joint_positions only when it actually ran; equal
-    // trajectories mean it was skipped, so a second report would duplicate.
-    if joint_positions != ik_joint_positions {
+    if sqp_ran {
         report_diagnostics(
             &rec,
             "sqp",

@@ -49,7 +49,7 @@ pub fn slip_residuals(
 
 pub struct SlipSummary {
     pub max_abs: f64,
-    pub max_index: usize,        // knot interval of the worst violation
+    pub max_index: Option<usize>, // interval of the worst violation; None if all zero
     pub count_above_tol: usize,
 }
 
@@ -96,10 +96,13 @@ at).
    Rerun, print a console summary:
 
 ```
-[ik]  pos err max 0.0123 m (knot 42), ori err max 0.045 rad (knot 42)
-[ik]  slip max 3.2e-03 m (interval 17), 40/74 intervals above 1e-06 m
+[ik]  pos err max 1.23e-2 m (knot 42), ori err max 4.5e-2 rad (knot 42)
+[ik]  slip max 3.2e-3 m (interval 17), 40/74 intervals above 1e-6 m
 [sqp] ...
 ```
+
+(Scientific notation throughout so sub-1e-4 errors stay visible; the worst
+slip interval prints `-` when every residual is exactly zero.)
 
 - SQP disabled or `solve_first_pose_only` set → only the IK series (slip needs
   ≥ 2 knots; skipped with a note otherwise).
