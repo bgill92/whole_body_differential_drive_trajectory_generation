@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Block until everything (including the ~50 MiB of URDF meshes) reaches the
     // viewer — dropping the stream on exit silently discards unsent data.
-    rec.flush_blocking();
+    rec.flush_blocking()?;
 
     Ok(())
 }
