@@ -142,19 +142,23 @@ fn report_diagnostics(
     base_joint_names: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let errors = pose_errors(goal_poses, joint_positions, kinematics);
-    let (max_pos, pos_knot) = errors
+    // total_cmp is NaN-robust — a plain `>` fold silently skips NaN, which
+    // would misreport a solver blowup as a zero error.
+    let (pos_knot, max_pos) = errors
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.position, i))
-        .fold((0.0, 0), |acc, cur| if cur.0 > acc.0 { cur } else { acc });
-    let (max_ori, ori_knot) = errors
+        .map(|(i, e)| (i, e.position))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0));
+    let (ori_knot, max_ori) = errors
         .iter()
         .enumerate()
-        .map(|(i, e)| (e.orientation, i))
-        .fold((0.0, 0), |acc, cur| if cur.0 > acc.0 { cur } else { acc });
+        .map(|(i, e)| (i, e.orientation))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0));
     println!(
-        "[{label}] pos err max {max_pos:.4} m (knot {pos_knot}), \
-         ori err max {max_ori:.4} rad (knot {ori_knot})"
+        "[{label}] pos err max {max_pos:.3e} m (knot {pos_knot}), \
+         ori err max {max_ori:.3e} rad (knot {ori_knot})"
     );
 
     let slips = if joint_positions.len() < 2 {
