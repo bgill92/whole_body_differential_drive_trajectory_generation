@@ -72,6 +72,37 @@ pub fn log_goal_axes(rec: &rerun::RecordingStream, poses: &[k::Isometry3<f64>]) 
     Ok(())
 }
 
+/// Log diagnostics series on the "step" timeline so they scrub in sync with
+/// the trajectory playback. `prefix` distinguishes trajectories ("ik", "sqp").
+/// The slip residual for interval k is logged at knot k+1 (the knot the
+/// motion ends at), so `slip[k]` pairs with `errors[k + 1]`.
+pub fn log_diagnostics(
+    rec: &rerun::RecordingStream,
+    prefix: &str,
+    pose_errors: &[wbdd::PoseError],
+    slip_residuals: &[f64],
+) -> Result<()> {
+    for (idx, error) in pose_errors.iter().enumerate() {
+        rec.set_time_sequence("step", idx as i64);
+        rec.log(
+            format!("diagnostics/{prefix}_position_error"),
+            &rerun::Scalars::single(error.position),
+        )?;
+        rec.log(
+            format!("diagnostics/{prefix}_orientation_error"),
+            &rerun::Scalars::single(error.orientation),
+        )?;
+    }
+    for (idx, residual) in slip_residuals.iter().enumerate() {
+        rec.set_time_sequence("step", (idx + 1) as i64);
+        rec.log(
+            format!("diagnostics/{prefix}_slip_residual"),
+            &rerun::Scalars::single(*residual),
+        )?;
+    }
+    Ok(())
+}
+
 /// Animate the joint-position trajectory on the "step" timeline.
 pub fn log_trajectory(
     rec: &rerun::RecordingStream,

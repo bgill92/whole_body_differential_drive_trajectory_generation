@@ -4,7 +4,10 @@ use rerun::external::re_importer::UrdfTree;
 
 use rerun::external::re_log;
 
-use wbdd::{Config, EqualityConstraint, Kinematics, differential_ik, trajectory};
+use wbdd::{
+    Config, EqualityConstraint, Kinematics, SLIP_TOLERANCE, differential_ik, pose_errors,
+    resolve_base_indices, slip_residuals, summarize_slip, trajectory,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     re_log::setup_logging();
@@ -66,8 +69,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let ik_joint_positions = joint_positions.clone();
+
     // Whole-trajectory SQP pass, warm-started from the sequential IK result.
     // Skipped in first-pose debug mode: the optimizer needs every knot.
+    let mut sqp_ran = false;
     if let Some(trajectory_config) = &config.trajectory
         && trajectory_config.enabled
     {
@@ -80,14 +86,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 trajectory_config,
                 &joint_positions,
             )?;
+            sqp_ran = true;
         }
     }
 
     visualization::log_trajectory(&rec, &urdf, &kinematics.joint_names(), &joint_positions)?;
 
+    let base_joint_names: Vec<String> = config
+        .trajectory
+        .as_ref()
+        .map(|t| t.base_joint_names.clone())
+        .unwrap_or_else(|| DEFAULT_BASE_JOINT_NAMES.map(String::from).to_vec());
+
+    report_diagnostics(
+        &rec,
+        "ik",
+        &goal_poses,
+        &ik_joint_positions,
+        &mut kinematics,
+        &base_joint_names,
+    )?;
+    if sqp_ran {
+        report_diagnostics(
+            &rec,
+            "sqp",
+            &goal_poses,
+            &joint_positions,
+            &mut kinematics,
+            &base_joint_names,
+        )?;
+    }
+
     // Block until everything (including the ~50 MiB of URDF meshes) reaches the
     // viewer — dropping the stream on exit silently discards unsent data.
     rec.flush_blocking()?;
 
+    Ok(())
+}
+
+/// Fallback planar base joints when the `trajectory` config section (which
+/// names them) is absent.
+const DEFAULT_BASE_JOINT_NAMES: [&str; 3] = [
+    "world_base_link_planar_prismatic_x",
+    "world_base_link_planar_prismatic_y",
+    "world_base_link_planar_yaw",
+];
+
+/// Compute, log, and print diagnostics for one solved trajectory.
+fn report_diagnostics(
+    rec: &rerun::RecordingStream,
+    label: &str,
+    goal_poses: &[k::Isometry3<f64>],
+    joint_positions: &[Vec<f64>],
+    kinematics: &mut Kinematics,
+    base_joint_names: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let errors = pose_errors(goal_poses, joint_positions, kinematics);
+    // total_cmp is NaN-robust — a plain `>` fold silently skips NaN, which
+    // would misreport a solver blowup as a zero error.
+    let (pos_knot, max_pos) = errors
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.position))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0));
+    let (ori_knot, max_ori) = errors
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.orientation))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap_or((0, 0.0));
+    println!(
+        "[{label}] pos err max {max_pos:.3e} m (knot {pos_knot}), \
+         ori err max {max_ori:.3e} rad (knot {ori_knot})"
+    );
+
+    let slips = if joint_positions.len() < 2 {
+        println!("[{label}] slip check skipped: fewer than two knots");
+        Vec::new()
+    } else {
+        let base = resolve_base_indices(&kinematics.joint_names(), base_joint_names)?;
+        let slips = slip_residuals(joint_positions, &base);
+        let summary = summarize_slip(&slips);
+        // max_index is None when every interval has exactly zero slip.
+        let worst = summary
+            .max_index
+            .map_or_else(|| "-".to_string(), |i| i.to_string());
+        println!(
+            "[{label}] slip max {:.3e} m (interval {worst}), {}/{} intervals above {SLIP_TOLERANCE:.0e} m",
+            summary.max_abs,
+            summary.count_above_tol,
+            slips.len(),
+        );
+        slips
+    };
+
+    visualization::log_diagnostics(rec, label, &errors, &slips)?;
     Ok(())
 }
