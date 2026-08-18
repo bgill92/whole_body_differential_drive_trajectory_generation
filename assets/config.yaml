@@ -1,5 +1,5 @@
 urdf_path: assets/rox_diff_ur5e.urdf
-end_joint: ur5ewrist_3_joint
+end_joint: grasp_link_joint
 
 # Waypoint poses in the world frame, linearly interpolated (translation lerp,
 # rotation slerp) into poses_per_segment poses per segment. rpy is
