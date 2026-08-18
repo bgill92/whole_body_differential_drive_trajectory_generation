@@ -2,6 +2,8 @@
 //! differential-drive lateral-slip residuals. Never feeds back into the
 //! solvers. See docs/superpowers/specs/2026-08-18-trajectory-diagnostics-design.md.
 
+use crate::kinematics::Kinematics;
+
 /// Chain indices of the planar base joints.
 #[derive(Debug, Clone, Copy)]
 pub struct BaseIndices {
@@ -93,9 +95,47 @@ pub fn summarize_slip(residuals: &[f64]) -> SlipSummary {
     }
 }
 
+/// End-effector tracking error at one knot.
+#[derive(Debug, Clone, Copy)]
+pub struct PoseError {
+    /// Meters: ‖t_actual − t_desired‖.
+    pub position: f64,
+    /// Radians: rotation angle between desired and actual orientation.
+    pub orientation: f64,
+}
+
+/// Pose-tracking error per knot: forward kinematics of each configuration
+/// against the corresponding goal pose. Pairs by index and stops at the
+/// shorter of the two slices (first-pose debug mode solves one knot against
+/// a full goal path). Restores the chain's joint positions on return.
+pub fn pose_errors(
+    goal_poses: &[k::Isometry3<f64>],
+    joint_positions: &[Vec<f64>],
+    kinematics: &mut Kinematics,
+) -> Vec<PoseError> {
+    let saved = kinematics.positions();
+    let errors = goal_poses
+        .iter()
+        .zip(joint_positions)
+        .map(|(goal, q)| {
+            kinematics.set_positions(q);
+            let actual = kinematics.end_pose();
+            PoseError {
+                position: (actual.translation.vector - goal.translation.vector).norm(),
+                // Quaternion angle_to is well-conditioned at all angles
+                // including π, unlike the matrix-trace acos route.
+                orientation: goal.rotation.angle_to(&actual.rotation),
+            }
+        })
+        .collect();
+    kinematics.set_positions(&saved);
+    errors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kinematics::Kinematics;
 
     // Base joints at chain indices 0..2, one arm joint behind them.
     fn base() -> BaseIndices {
@@ -170,5 +210,43 @@ mod tests {
         assert_eq!(summary.max_abs, 0.0);
         assert!(summary.max_index.is_none());
         assert_eq!(summary.count_above_tol, 0);
+    }
+
+    #[test]
+    fn pose_errors_zero_against_own_fk() {
+        let mut kinematics =
+            Kinematics::build("assets/rox_diff_ur5e.urdf", "grasp_link_joint").unwrap();
+        let q = kinematics.positions();
+        kinematics.set_positions(&q);
+        let goals = vec![kinematics.end_pose()];
+        let errors = pose_errors(&goals, &[q], &mut kinematics);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].position < 1e-12);
+        assert!(errors[0].orientation < 1e-12);
+    }
+
+    #[test]
+    fn pose_errors_reports_translation_offset() {
+        let mut kinematics =
+            Kinematics::build("assets/rox_diff_ur5e.urdf", "grasp_link_joint").unwrap();
+        let q = kinematics.positions();
+        kinematics.set_positions(&q);
+        let mut goal = kinematics.end_pose();
+        goal.translation.vector.x += 0.1;
+        let errors = pose_errors(&[goal], &[q], &mut kinematics);
+        assert!((errors[0].position - 0.1).abs() < 1e-12);
+        assert!(errors[0].orientation < 1e-12);
+    }
+
+    #[test]
+    fn pose_errors_restores_kinematics_state() {
+        let mut kinematics =
+            Kinematics::build("assets/rox_diff_ur5e.urdf", "grasp_link_joint").unwrap();
+        let before = kinematics.positions();
+        let mut q_other = before.clone();
+        q_other[0] += 1.0;
+        let goals = vec![kinematics.end_pose()];
+        let _ = pose_errors(&goals, &[q_other], &mut kinematics);
+        assert_eq!(kinematics.positions(), before);
     }
 }
