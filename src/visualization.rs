@@ -85,18 +85,18 @@ pub fn log_diagnostics(
     for (idx, error) in pose_errors.iter().enumerate() {
         rec.set_time_sequence("step", idx as i64);
         rec.log(
-            format!("diagnostics/{prefix}/position_error"),
+            format!("diagnostics/{prefix}_position_error"),
             &rerun::Scalars::single(error.position),
         )?;
         rec.log(
-            format!("diagnostics/{prefix}/orientation_error"),
+            format!("diagnostics/{prefix}_orientation_error"),
             &rerun::Scalars::single(error.orientation),
         )?;
     }
     for (idx, residual) in slip_residuals.iter().enumerate() {
         rec.set_time_sequence("step", (idx + 1) as i64);
         rec.log(
-            format!("diagnostics/{prefix}/slip_residual"),
+            format!("diagnostics/{prefix}_slip_residual"),
             &rerun::Scalars::single(*residual),
         )?;
     }

@@ -46,7 +46,7 @@ The pipeline has three stages:
 After solving, the program reports **diagnostics** for both the sequential-IK
 and SQP trajectories: per-knot end-effector position/orientation error and the
 per-interval lateral-slip residual of the base, logged as Rerun time series
-(`diagnostics/{ik,sqp}/...` on the `step` timeline) with a console summary of
+(`diagnostics/{ik,sqp}_...` on the `step` timeline) with a console summary of
 the worst violations.
 
 ## Requirements

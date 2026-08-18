@@ -77,12 +77,12 @@ New function logging scalar series on the existing `step` sequence timeline
 with the 3D view:
 
 ```
-diagnostics/ik/position_error       (m)
-diagnostics/ik/orientation_error    (rad)
-diagnostics/ik/slip_residual        (m, signed)
-diagnostics/sqp/position_error
-diagnostics/sqp/orientation_error
-diagnostics/sqp/slip_residual
+diagnostics/ik_position_error       (m)
+diagnostics/ik_orientation_error    (rad)
+diagnostics/ik_slip_residual        (m, signed)
+diagnostics/sqp_position_error
+diagnostics/sqp_orientation_error
+diagnostics/sqp_slip_residual
 ```
 
 Slip residual for interval k is logged at knot k+1 (the knot the motion ends
