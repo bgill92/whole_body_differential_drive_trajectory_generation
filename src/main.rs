@@ -12,7 +12,12 @@ use wbdd::{
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     re_log::setup_logging();
 
-    let rec = rerun::RecordingStreamBuilder::new("urdf_view").spawn()?;
+    // Spawn the Rerun viewer, or — when WBDD_RRD_PATH is set — write the
+    // recording to an .rrd file for offline playback and rendering.
+    let rec = match std::env::var("WBDD_RRD_PATH") {
+        Ok(path) => rerun::RecordingStreamBuilder::new("urdf_view").save(path)?,
+        Err(_) => rerun::RecordingStreamBuilder::new("urdf_view").spawn()?,
+    };
 
     let config_path = std::env::args()
         .nth(1)
