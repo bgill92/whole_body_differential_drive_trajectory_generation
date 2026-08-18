@@ -3,18 +3,12 @@
 //! docs/superpowers/specs/2026-08-14-sqp-trajectory-optimization-design.md.
 
 use crate::configs::{EeTracking, TrajectoryConfig};
+use crate::diagnostics::{BaseIndices, resolve_base_indices, slip_residual};
 use crate::kinematics::{Kinematics, pose_error_twist};
 use crate::qp;
 
 type DMat = k::nalgebra::DMatrix<f64>;
 type DVec = k::nalgebra::DVector<f64>;
-
-/// Chain indices of the planar base joints.
-struct BaseIndices {
-    x: usize,
-    y: usize,
-    yaw: usize,
-}
 
 /// No-lateral-slip constraint for one knot interval, linearized at the current
 /// configurations: c = sin(θ̄)·Δx − cos(θ̄)·Δy with θ̄ the midpoint heading.
@@ -33,7 +27,7 @@ fn nonholonomic_linearization(
     let mid_yaw = 0.5 * (q_k[base.yaw] + q_k1[base.yaw]);
     let (sin_mid, cos_mid) = mid_yaw.sin_cos();
 
-    let residual = sin_mid * dx - cos_mid * dy;
+    let residual = slip_residual(q_k, q_k1, base);
     // d/dθ̄ (sin θ̄·Δx − cos θ̄·Δy) = cos θ̄·Δx + sin θ̄·Δy, and ∂θ̄/∂θ_k =
     // ∂θ̄/∂θ_{k+1} = ½, so both yaw partials share this value.
     let dyaw = 0.5 * (cos_mid * dx + sin_mid * dy);
@@ -89,30 +83,6 @@ fn add_block(p: &mut DMat, row0: usize, col0: usize, block: &DMat) {
             p[(row0 + r, col0 + c)] += block[(r, c)];
         }
     }
-}
-
-fn resolve_base_indices(
-    joint_names: &[String],
-    base_joint_names: &[String],
-) -> Result<BaseIndices, String> {
-    if base_joint_names.len() != 3 {
-        return Err(format!(
-            "base_joint_names must list exactly [x, y, yaw], got {} entries",
-            base_joint_names.len()
-        ));
-    }
-    let mut indices = [0usize; 3];
-    for (slot, name) in base_joint_names.iter().enumerate() {
-        indices[slot] = joint_names
-            .iter()
-            .position(|joint| joint == name)
-            .ok_or_else(|| format!("base joint '{name}' not in serial chain"))?;
-    }
-    Ok(BaseIndices {
-        x: indices[0],
-        y: indices[1],
-        yaw: indices[2],
-    })
 }
 
 /// ℓ1 exact-penalty merit: tracking + smoothness costs plus a penalty on
