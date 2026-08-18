@@ -8,6 +8,26 @@ end-effector path while respecting the base's no-lateral-slip (nonholonomic)
 constraint, and streams the result to the [Rerun](https://rerun.io) viewer for
 3D playback.
 
+## TL;DR
+
+```bash
+# 1. Install Rust (stable): https://rustup.rs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 2. Install the Rerun viewer (must be on PATH)
+cargo install rerun-cli   # or: pip install rerun-sdk
+
+# 3. Clone and run
+git clone <this-repo-url>
+cd whole_body_differential_drive_trajectory_generation
+cargo run --release       # uses assets/config.yaml
+```
+
+A Rerun window opens with the robot, the end-effector path, and the solved
+whole-body trajectory playing back. Edit `assets/config.yaml` (or pass your own
+config: `cargo run --release -- path/to/config.yaml`) to change waypoints and
+solver settings.
+
 ## How It Works
 
 The pipeline has three stages:
