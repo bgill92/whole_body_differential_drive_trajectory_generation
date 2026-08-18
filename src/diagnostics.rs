@@ -37,7 +37,7 @@ pub fn resolve_base_indices(
 /// Lateral slip of the base over one knot interval:
 /// sin(θ̄)·Δx − cos(θ̄)·Δy with θ̄ the midpoint heading. Zero iff the base
 /// motion satisfies the differential-drive no-lateral-slip constraint.
-/// Signed: positive is slip to the base's left.
+/// Signed: positive is slip to the base's right.
 pub fn slip_residual(q_k: &[f64], q_k1: &[f64], base: &BaseIndices) -> f64 {
     let dx = q_k1[base.x] - q_k[base.x];
     let dy = q_k1[base.y] - q_k[base.y];
