@@ -67,7 +67,7 @@ world ──(prismatic x)──(prismatic y)──(revolute yaw)── base_link
 so the entire robot is a single serial chain with configuration
 
 $$
-q = [\underbrace{x,\; y,\; \theta}_{\text{base}},\; \underbrace{q_1, \dots, q_6}_{\text{arm}}, \dots] \in \mathbb{R}^n .
+q = [\underbrace{x,  y,  \theta}_{\text{base}},  \underbrace{q_1, \dots, q_6}_{\text{arm}}, \dots] \in \mathbb{R}^n .
 $$
 
 This buys two things:
@@ -92,11 +92,11 @@ $T(q) \in SE(3)$ and a goal pose $T_{\text{goal}}$. The code uses the **matrix
 logarithm** of the relative transform:
 
 $$
-r(q) \;=\; \log\!\left( T_{\text{goal}}\, T(q)^{-1} \right) \;\in\; \mathbb{R}^6,
+r(q)  =  \log\!\left( T_{\text{goal}}  T(q)^{-1} \right)  \in  \mathbb{R}^6,
 $$
 
 implemented by `se3_log` / `pose_error_twist` in `src/kinematics.rs`. The
-result is a **twist** $[v;\, \omega]$: the constant spatial velocity that,
+result is a **twist** $[v;  \omega]$: the constant spatial velocity that,
 applied for one unit of time, carries the current pose to the goal.
 $\omega$ is the axis–angle vector of the rotation error; $v$ is the
 translation error mapped through the inverse left Jacobian of $SO(3)$ (not
@@ -121,19 +121,19 @@ Two numerical details worth knowing (they are in comments in the code too):
 - The coefficient in the inverse left Jacobian is $0/0$ at $\theta = 0$, so
   a Taylor series is used below $\theta = 10^{-6}$.
 
-Ordering convention: this codebase uses $[v;\, \omega]$ (linear first) to
+Ordering convention: this codebase uses $[v;  \omega]$ (linear first) to
 match `k::jacobian`. Modern Robotics and much of the literature use
-$[\omega;\, v]$ — reorder when cross-checking formulas.
+$[\omega;  v]$ — reorder when cross-checking formulas.
 
 ## 4. What a QP is, and what Clarabel does
 
 A **quadratic program** (QP) is an optimization problem of the form
 
 $$
-\min_{x \in \mathbb{R}^n}\;\; \tfrac{1}{2} x^\top P x + q^\top x
+\min_{x \in \mathbb{R}^n}   \tfrac{1}{2} x^\top P x + q^\top x
 \quad \text{s.t.} \quad
-A_{\text{eq}}\, x = b_{\text{eq}},\qquad
-A_{\text{in}}\, x \le b_{\text{in}},\qquad
+A_{\text{eq}}  x = b_{\text{eq}},\qquad
+A_{\text{in}}  x \le b_{\text{in}},\qquad
 l \le x \le u,
 $$
 
@@ -148,7 +148,7 @@ which constraints bind — is handled inside the solver.
 This project uses [Clarabel](https://clarabel.org), an **interior-point**
 solver. Two facts about interior-point methods matter for reading this code:
 
-- **Conic form.** Clarabel wants constraints as $Ax + s = b,\; s \in K$
+- **Conic form.** Clarabel wants constraints as $Ax + s = b,  s \in K$
   where $K$ is a product of cones. `src/qp.rs` does the translation:
   equality rows go into the *zero cone* ($s = 0$), and inequality rows and
   finite box bounds are all rewritten as one-sided rows in the *nonnegative
@@ -177,8 +177,8 @@ This explodes near kinematic singularities, where $J$ loses rank and
 $J^{+}$ blows up. The standard fix is **damped least squares** (DLS):
 
 $$
-\Delta q = \arg\min_{\Delta q}\; \tfrac{1}{2}\, \| J \Delta q - r \|^2 + \tfrac{1}{2}\, \lambda^2 \| \Delta q \|^2
-\;=\; (J^\top J + \lambda^2 I)^{-1} J^\top r,
+\Delta q = \arg\min_{\Delta q}  \tfrac{1}{2}  \| J \Delta q - r \|^2 + \tfrac{1}{2}  \lambda^2 \| \Delta q \|^2
+ =  (J^\top J + \lambda^2 I)^{-1} J^\top r,
 $$
 
 which trades a little tracking accuracy for bounded, well-conditioned steps
@@ -187,8 +187,8 @@ which trades a little tracking accuracy for bounded, well-conditioned steps
 Expanding the DLS objective shows it is *already* a QP:
 
 $$
-\tfrac{1}{2}\, \Delta q^\top \underbrace{(J^\top J + \lambda^2 I)}_{P} \Delta q
-\;-\; \underbrace{(J^\top r)}_{-q_{\text{lin}}}{}^\top \Delta q \;+\; \text{const}.
+\tfrac{1}{2}  \Delta q^\top \underbrace{(J^\top J + \lambda^2 I)}_{P} \Delta q
+ -  \underbrace{(J^\top r)}_{-q_{\text{lin}}}{}^\top \Delta q  +  \text{const}.
 $$
 
 Solving it *as* a QP instead of by linear solve costs a little speed and
@@ -196,9 +196,9 @@ buys the ability to add constraints that a matrix inverse cannot express:
 
 $$
 \begin{aligned}
-\min_{\Delta q}\;\; & \tfrac{1}{2} \Delta q^\top (J^\top J + \lambda^2 I)\, \Delta q - (J^\top r)^\top \Delta q \\
-\text{s.t.}\;\; & A_{\text{eq}}\, \Delta q = q^{\text{pin}} - q &&\text{(pinned joints, e.g. elbow posture)}\\
-& q_{\text{lower}} - q \;\le\; \Delta q \;\le\; q_{\text{upper}} - q &&\text{(URDF joint limits).}
+\min_{\Delta q}   & \tfrac{1}{2} \Delta q^\top (J^\top J + \lambda^2 I)  \Delta q - (J^\top r)^\top \Delta q \\
+\text{s.t.}   & A_{\text{eq}}  \Delta q = q^{\text{pin}} - q &&\text{(pinned joints, e.g. elbow posture)}\\
+& q_{\text{lower}} - q  \le  \Delta q  \le  q_{\text{upper}} - q &&\text{(URDF joint limits).}
 \end{aligned}
 $$
 
@@ -230,21 +230,21 @@ program (NLP):
 
 $$
 \begin{aligned}
-\min_{Q}\;\;
-& \sum_{k=0}^{N-1} \tfrac{1}{2}\, w_{\text{ee}} \| r_k(q_k) \|^2
+\min_{Q}  
+& \sum_{k=0}^{N-1} \tfrac{1}{2}  w_{\text{ee}} \| r_k(q_k) \|^2
 && \text{end-effector tracking (soft mode)} \\
-&+ \sum_{k=0}^{N-2} \tfrac{1}{2}\, w_{\text{smooth}} \| q_{k+1} - q_k \|^2
+&+ \sum_{k=0}^{N-2} \tfrac{1}{2}  w_{\text{smooth}} \| q_{k+1} - q_k \|^2
 && \text{smoothness} \\
-&+ \sum_{k=0}^{N-2} \tfrac{1}{2}\, w_{\text{back}} \min(s_k(Q), 0)^2
-&& \text{backward-motion penalty} \\[4pt]
-\text{s.t.}\;\;
+&+ \sum_{k=0}^{N-2} \tfrac{1}{2}  w_{\text{back}} \min(s_k(Q), 0)^2
+&& \text{backward-motion penalty} \\
+\text{s.t.}  
 & c_k(Q) = 0, \quad k = 0,\dots,N\!-\!2
 && \text{no lateral slip (Section 7)} \\
-& |q_{k+1} - q_k| \le v_{\max}\, \Delta t \;\; \text{elementwise}
+& |q_{k+1} - q_k| \le v_{\max}  \Delta t    \text{elementwise}
 && \text{joint velocity limits} \\
 & q_{\text{lower}} \le q_k \le q_{\text{upper}}
 && \text{joint position limits} \\
-& \big[\; r_k(q_k) = 0 \;\big]
+& \big[  r_k(q_k) = 0  \big]
 && \text{(hard tracking mode only).}
 \end{aligned}
 $$
@@ -289,7 +289,7 @@ Eliminating $v$ from the first two equations gives the constraint in
 velocity form:
 
 $$
-\boxed{\;\sin\theta \cdot \dot x \;-\; \cos\theta \cdot \dot y \;=\; 0\;}
+\boxed{ \sin\theta \cdot \dot x  -  \cos\theta \cdot \dot y  =  0 }
 $$
 
 i.e. *the velocity component perpendicular to the heading is zero*. This is
@@ -310,7 +310,7 @@ $\bar\theta = \tfrac{1}{2}(\theta_k + \theta_{k+1})$. The discrete slip
 residual is
 
 $$
-c_k \;=\; \sin\bar\theta \cdot \Delta x \;-\; \cos\bar\theta \cdot \Delta y ,
+c_k  =  \sin\bar\theta \cdot \Delta x  -  \cos\bar\theta \cdot \Delta y ,
 $$
 
 implemented by `slip_residual` in `src/diagnostics.rs`. Geometrically,
@@ -332,10 +332,10 @@ The same construction with the longitudinal axis gives the **forward
 progress**
 
 $$
-s_k \;=\; \cos\bar\theta \cdot \Delta x \;+\; \sin\bar\theta \cdot \Delta y ,
+s_k  =  \cos\bar\theta \cdot \Delta x  +  \sin\bar\theta \cdot \Delta y ,
 $$
 
-which is the signed distance driven along the heading ($s_k = v\,\Delta t$
+which is the signed distance driven along the heading ($s_k = v \Delta t$
 when the no-slip constraint holds; negative $s_k$ is reverse motion). It
 feeds the backward-motion penalty.
 
@@ -375,7 +375,7 @@ A QP needs a quadratic objective and **linear** constraints. The NLP fails
 this on two counts:
 
 1. **The no-slip constraint is nonlinear in the decision variables.**
-   $c_k = \sin\bar\theta\,\Delta x - \cos\bar\theta\,\Delta y$ multiplies
+   $c_k = \sin\bar\theta \Delta x - \cos\bar\theta \Delta y$ multiplies
    trigonometric functions of some variables ($\theta$) by differences of
    others ($\Delta x, \Delta y$). Worse, the feasible set it defines is
    **nonconvex**: the base can get from A to B along many qualitatively
@@ -412,7 +412,7 @@ $w (J^\top J + \sum_i r_i \nabla^2 r_i)$. Gauss-Newton drops the
 second-derivative term and uses just
 
 $$
-H \approx w\, J^\top J .
+H \approx w  J^\top J .
 $$
 
 Three reasons, all load-bearing:
@@ -447,10 +447,10 @@ $\Delta Q = [\Delta q_0; \dots; \Delta q_{N-1}] \in \mathbb{R}^{Nn}$, and
 the subproblem has exactly the generic form of Section 4:
 
 $$
-\min_{\Delta Q}\; \tfrac{1}{2} \Delta Q^\top P\, \Delta Q + q_{\text{lin}}^\top \Delta Q
+\min_{\Delta Q}  \tfrac{1}{2} \Delta Q^\top P  \Delta Q + q_{\text{lin}}^\top \Delta Q
 \quad \text{s.t.} \quad
-A_{\text{eq}} \Delta Q = b_{\text{eq}},\;\;
-A_{\text{in}} \Delta Q \le b_{\text{in}},\;\;
+A_{\text{eq}} \Delta Q = b_{\text{eq}},  
+A_{\text{in}} \Delta Q \le b_{\text{in}},  
 l \le \Delta Q \le u .
 $$
 
@@ -459,9 +459,9 @@ $$
 Per knot, Gauss-Newton on $\tfrac{1}{2} w_{\text{ee}} \| r_k \|^2$:
 
 $$
-P \mathrel{+}= w_{\text{ee}}\, J_k^\top J_k \;\;\text{(block $k$,$k$)},
+P \mathrel{+}= w_{\text{ee}}  J_k^\top J_k   \text{(block $k$,$k$)},
 \qquad
-q_{\text{lin}} \mathrel{-}= w_{\text{ee}}\, J_k^\top r_k \;\;\text{(block $k$)}.
+q_{\text{lin}} \mathrel{-}= w_{\text{ee}}  J_k^\top r_k   \text{(block $k$)}.
 $$
 
 The linear term is the (negated) gradient: it pulls each knot in the
@@ -477,9 +477,9 @@ block pattern
 
 $$
 P \mathrel{+}= w_s \begin{bmatrix} I & -I \\ -I & I \end{bmatrix}
-\;\;\text{(blocks $k$ and $k{+}1$)},
+  \text{(blocks $k$ and $k{+}1$)},
 \qquad
-q_{\text{lin}}\text{: } -w_s d_k \text{ on block } k,\;\; +w_s d_k \text{ on block } k{+}1 .
+q_{\text{lin}}\text{: } -w_s d_k \text{ on block } k,   +w_s d_k \text{ on block } k{+}1 .
 $$
 
 Summed over intervals this assembles the standard first-difference
@@ -496,8 +496,8 @@ It is treated Gauss-Newton style with an active set read off the current
 iterate: intervals with $s_k < 0$ contribute
 
 $$
-P \mathrel{+}= w_b\, g_k g_k^\top, \qquad
-q_{\text{lin}} \mathrel{+}= w_b\, s_k\, g_k,
+P \mathrel{+}= w_b  g_k g_k^\top, \qquad
+q_{\text{lin}} \mathrel{+}= w_b  s_k  g_k,
 $$
 
 where $g_k = \nabla s_k$ is the six-entry gradient from
@@ -530,7 +530,7 @@ region.
 One row per interval, the linearization from Section 7:
 
 $$
-\nabla c_k^\top \Delta Q = \alpha \,(-c_k),
+\nabla c_k^\top \Delta Q = \alpha  (-c_k),
 $$
 
 six nonzeros per row. The right-hand side asks the step to cancel the
@@ -540,7 +540,7 @@ Section 10.
 In hard tracking mode, six more rows per knot:
 
 $$
-J_k\, \Delta q_k = \alpha\, r_k ,
+J_k  \Delta q_k = \alpha  r_k ,
 $$
 
 demanding the step cancel the pose error exactly. (Sign note: the residual
@@ -563,7 +563,7 @@ satisfy yields an infeasible QP and no progress at all. So the actual bound
 per row is the **progressive budget**
 
 $$
-b_k^j = \max\!\big( |d_k^j| - \rho,\;\; v_{\max}\, \Delta t \big),
+b_k^j = \max\!\big( |d_k^j| - \rho,   v_{\max}  \Delta t \big),
 $$
 
 with $\rho$ the trust-region radius: wherever the limit is reachable this
@@ -580,9 +580,9 @@ Per variable, the same re-anchoring as the IK QP, intersected with the
 trust region:
 
 $$
-\max\!\big(q_{\text{lower}}^j - q_k^j,\; -\rho\big)
-\;\le\; \Delta q_k^j \;\le\;
-\min\!\big(q_{\text{upper}}^j - q_k^j,\; \rho\big).
+\max\!\big(q_{\text{lower}}^j - q_k^j,  -\rho\big)
+ \le  \Delta q_k^j  \le 
+\min\!\big(q_{\text{upper}}^j - q_k^j,  \rho\big).
 $$
 
 The trust region is thus an $\infty$-norm ball — a box — which costs
@@ -609,10 +609,10 @@ constraint violation, or vice versa. Which is "better"? A **merit function**
 scalarizes the comparison:
 
 $$
-\phi(Q) \;=\; \underbrace{\text{cost}(Q)}_{\text{tracking + smoothness + backward}}
-\;+\; \nu \sum_k |c_k(Q)|
-\;+\; \nu \sum_{k,j} \max\!\big(|d_k^j| - v_{\max}\Delta t,\; 0\big)
-\;\;\left[+\; \nu \sum_k \|r_k\|_1 \;\text{in hard mode}\right],
+\phi(Q)  =  \underbrace{\text{cost}(Q)}_{\text{tracking + smoothness + backward}}
+ +  \nu \sum_k |c_k(Q)|
+ +  \nu \sum_{k,j} \max\!\big(|d_k^j| - v_{\max}\Delta t,  0\big)
+  \left[+  \nu \sum_k \|r_k\|_1  \text{in hard mode}\right],
 $$
 
 with penalty weight $\nu = 10^4$. The $\ell_1$ (absolute-value) penalty has
@@ -679,7 +679,7 @@ best-effort with a stderr warning (after progress has been made).
 It is worth spelling out the punchline, because it is the reason the whole
 construction is sound. Suppose the iteration has converged: the QP at the
 current iterate returns $\Delta Q \approx 0$. Then the equality rows read
-$\nabla c^\top \cdot 0 = -\alpha\, c$, i.e. $c = 0$: **zero slip, measured
+$\nabla c^\top \cdot 0 = -\alpha  c$, i.e. $c = 0$: **zero slip, measured
 by the true nonlinear residual**, not the linearization. The linearization
 error, which is second-order in the step, vanishes with the step itself.
 The same argument covers the hard-mode tracking rows ($r_k = 0$) and, since
