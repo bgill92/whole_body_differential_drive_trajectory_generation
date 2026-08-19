@@ -99,6 +99,157 @@ end-effector path with goal axes, and the solved whole-body trajectory played
 back over time. The program blocks on exit until all data (including ~50 MiB
 of URDF meshes) reaches the viewer.
 
+## Genesis Simulation Demo
+
+![Solved whole-body trajectory executed in the Genesis simulator](assets/genesis_demo.gif)
+
+The same solved trajectory executed by the robot in
+[Genesis](https://github.com/Genesis-Embodied-AI/Genesis): `scripts/genesis_sim.py`
+runs the Rust pipeline with `WBDD_RRD_PATH` set (the same save hook
+`render_demo.py` uses), reads the animated joint transforms back out of the
+Rerun recording, and plays them through the diff-drive base + UR5e arm loaded
+in Genesis. Playback is kinematic — the base and arm are driven along the
+solved knots; there is no dynamics or controller tracking. The
+[ROS Control Demo](#ros-control-demo-genesis_ros) below closes that loop: the
+trajectory arrives as ROS joint commands and Genesis tracks them through its
+controllers.
+
+Genesis is a heavy pip dependency and is intentionally not part of CI. Install
+it in a virtualenv (the `rerun-sdk` version must match the crate's `rerun`
+version in `Cargo.toml`; a CPU PyTorch wheel is enough):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install genesis-world "rerun-sdk==0.34.1"
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# headless: solves, simulates, and writes assets/genesis_demo.gif
+.venv/bin/python scripts/genesis_sim.py
+
+# interactive viewer instead of the offscreen capture
+.venv/bin/python scripts/genesis_sim.py --viewer
+```
+
+Offscreen capture needs a Vulkan-capable GPU; without one, run with
+`--viewer` on a machine with a display. The script patches a temporary copy of
+the URDF (Genesis requires joint limits on the virtual planar base joints,
+which carry none) and leaves `assets/rox_diff_ur5e.urdf` untouched.
+
+## ROS Control Demo (genesis_ros)
+
+![Solved whole-body trajectory executed through ROS control in Genesis](assets/genesis_ros_demo.gif)
+
+The same solved trajectory executed through ROS instead of kinematic playback:
+the trajectory is published as ROS joint commands and
+[genesis_ros](https://github.com/vybhav-ibr/genesis_ros) — a third-party
+Genesis/ROS 2 bridge — drives the simulated robot from them.
+
+```
+cargo run --release (WBDD_RRD_PATH=demo.rrd)
+        │  solved whole-body trajectory in a Rerun recording
+        ▼
+scripts/wbdd_trajectory_publisher.py      ROS 2 node, reads demo.rrd,
+        │  sensor_msgs/JointState on      indexes it by simulation time
+        │  /wbdd/joint_commands           from /clock, and publishes
+        ▼                                 base velocities + arm positions
+scripts/genesis_ros_sim.py                GsRosBridge from genesis_ros:
+        │                                 Genesis scene + robot per
+        ▼                                 assets/genesis_ros.yaml,
+Genesis simulation                        subscribes to the commands and
+                                          applies them as motor targets
+```
+
+The three planar base joints are velocity-commanded and the six UR5e joints
+position-commanded, per the `joint_properties` in `assets/genesis_ros.yaml`
+(kp/kv gains included, tuned for this trajectory). The bridge publishes
+`/clock` and `/wbdd/joint_states`; the publisher indexes the trajectory from
+`/clock`, so commands stay synchronized with simulation time regardless of
+how fast the simulation steps. Scene and robot setup (patched URDF, plane,
+camera, trajectory loading from the recording) is shared with the kinematic
+demo through `scripts/genesis_common.py`.
+
+### Install
+
+ROS 2 (validated on Jazzy), Genesis, and genesis_ros are all required, so the
+easy route is a container: `ros:jazzy` plus the steps below. genesis_ros is
+early-stage third-party code, so pin the exact commit validated here
+(`c278c6eeed90b4da0586241991386dcb611799cf`) and Genesis `1.1.2` (the release
+contemporaneous with that commit; its README's "tested with v0.3.5" claim is
+stale, and no release builds a scene from a config without the compat shim
+below).
+
+```bash
+# ROS 2 workspace with genesis_ros (pinned commit) + the compat shim
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+git clone https://github.com/vybhav-ibr/genesis_ros.git
+cd genesis_ros
+git checkout c278c6eeed90b4da0586241991386dcb611799cf
+git submodule update --init --recursive
+git apply <path-to-this-repo>/scripts/genesis_ros-compat.patch
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --packages-select simulation_interfaces gs_ros_interfaces \
+  gs_simulation_interfaces gs_ros
+source install/setup.bash
+
+# Python dependencies: Genesis pinned to the validated release, numpy
+# downgraded afterwards for ROS 2 compatibility (genesis pulls a newer one),
+# rerun-sdk matching the crate's rerun version in Cargo.toml
+pip install genesis-world==1.1.2
+pip install numpy==1.26.4
+pip install "rerun-sdk==0.34.1" pyarrow matplotlib
+
+# in a bare container (e.g. ros:jazzy) also:
+apt-get install --no-install-recommends libglu1-mesa libgl1 libosmesa6 \
+  ros-jazzy-cv-bridge
+```
+
+### Run
+
+```bash
+# 1. solve and record (in the repo root)
+WBDD_RRD_PATH=demo.rrd cargo run --release
+
+# 2. bridge: Genesis + genesis_ros, headless GIF capture
+#    (add --viewer for an interactive window instead)
+source ~/ros2_ws/install/setup.bash
+python3 scripts/genesis_ros_sim.py --rrd demo.rrd
+
+# 3. command stream, in a second shell with the same environment
+python3 scripts/wbdd_trajectory_publisher.py --rrd demo.rrd
+```
+
+The bridge runs until the trajectory plus a short settle window has played
+out in simulation time, then encodes `assets/genesis_ros_demo.gif`.
+
+Validated end to end in a `ros:jazzy` container with Genesis on the CPU
+backend (headless): the committed GIF and a topic transcript (commands vs.
+simulated `/wbdd/joint_states`, arm tracking within ~0.02 rad) come from that
+run. Interactive `--viewer` mode was not validated here (no display).
+
+### Maturity caveats
+
+- genesis_ros is early-stage: placeholder package metadata, no CI, and its
+  README itself warns about Genesis version drift. Everything here is pinned
+  (commit and versions above) to what was validated.
+- The pinned commit cannot build a config-driven scene against any released
+  Genesis (`gs.Scene` is called with option kwargs that no release accepts).
+  `scripts/genesis_ros-compat.patch` filters those kwargs by the installed
+  `Scene` signature; it is the only third-party change and is required.
+  `assets/genesis_ros.yaml` likewise omits the `viewer_config`/`rigid_config`
+  blocks whose option attributes the pinned release rejects.
+- Control uses genesis_ros's direct topic interface (`JointState` on
+  `/wbdd/joint_commands`), not `ros2_control` — there is no controller
+  lifecycle, just PD gains applied by Genesis.
+- The genesis_ros command callback consumes `position`/`velocity` arrays in
+  alphabetical `joint_properties` order rather than `msg.name` order; the
+  publisher packs messages to match (see `command_groups` in
+  `scripts/wbdd_trajectory_publisher.py`).
+- The planar base joints have no physical wheels underneath them (the URDF's
+  wheel links are fixed), so the base slides on its casters; gains in
+  `assets/genesis_ros.yaml` were tuned for this trajectory and scene, not
+  generally.
+
 ## Configuration
 
 Everything is driven by a YAML config (see `assets/config.yaml` for the
@@ -161,6 +312,7 @@ src/
   visualization.rs  # Rerun logging (URDF, path, goal axes, trajectory)
 assets/
   config.yaml       # reference configuration
+  genesis_ros.yaml  # scene/robot/control config for the ROS control demo
   rox_diff_ur5e.urdf# ROX base + UR5e + Robotiq gripper, with a planar
                     # (x, y, yaw) joint stack connecting world to base
   meshes/           # visual + collision meshes
@@ -171,6 +323,14 @@ docs/
   superpowers/specs/             # design docs (corner rounding, SQP)
 scripts/
   render_demo.py                 # regenerates assets/demo.gif headlessly
+  genesis_common.py              # shared URDF/trajectory helpers for the
+                                 # Genesis demos
+  genesis_sim.py                 # plays the trajectory in Genesis, regenerates
+                                 # assets/genesis_demo.gif headlessly
+  genesis_ros_sim.py             # genesis_ros bridge entrypoint for the ROS
+                                 # control demo (assets/genesis_ros_demo.gif)
+  wbdd_trajectory_publisher.py   # publishes the solved trajectory as ROS
+                                 # joint commands for the control demo
 ```
 
 The mobile base is modeled with three planar joints

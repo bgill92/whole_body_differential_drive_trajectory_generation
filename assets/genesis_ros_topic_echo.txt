@@ -1,0 +1,169 @@
+### topics while the trajectory executes
+/clock
+/parameter_events
+/rosout
+/wbdd/joint_commands
+/wbdd/joint_control
+/wbdd/joint_states
+
+### first /wbdd/joint_commands message
+header:
+  stamp:
+    sec: 0
+    nanosec: 0
+  frame_id: ''
+name:
+- ur5eelbow_joint
+- ur5eshoulder_lift_joint
+- ur5eshoulder_pan_joint
+- ur5ewrist_1_joint
+- ur5ewrist_2_joint
+- ur5ewrist_3_joint
+- world_base_link_planar_prismatic_x
+- world_base_link_planar_prismatic_y
+- world_base_link_planar_yaw
+position:
+- 1.3606997998561146
+- -1.2811036478985274
+- -2.083859300297731
+- 1.4912082885063294
+- 1.570801226296763
+- -1.9032339455196932
+velocity:
+- 0.00858449935913086
+- -0.06008577346801758
+- -0.02639420347428345
+effort: []
+---
+
+### /wbdd/joint_commands mid-trajectory (t+15s after first command)
+header:
+  stamp:
+    sec: 0
+    nanosec: 0
+  frame_id: ''
+name:
+- ur5eelbow_joint
+- ur5eshoulder_lift_joint
+- ur5eshoulder_pan_joint
+- ur5ewrist_1_joint
+- ur5ewrist_2_joint
+- ur5ewrist_3_joint
+- world_base_link_planar_prismatic_x
+- world_base_link_planar_prismatic_y
+- world_base_link_planar_yaw
+position:
+- 1.2230447797564212
+- -1.1800441507664068
+- -2.5572652088101724
+- 1.5278018887560305
+- 1.5708050147679984
+- -1.9550831945089495
+velocity:
+- 0.004007101058959961
+- -0.0633748471736908
+- 0.0014035395885549917
+effort: []
+---
+
+### /wbdd/joint_states mid-trajectory (simulated state from genesis_ros)
+header:
+  stamp:
+    sec: 18
+    nanosec: 179999999
+  frame_id: ''
+name:
+- world_base_link_planar_prismatic_x
+- world_base_link_planar_prismatic_y
+- world_base_link_planar_yaw
+- ur5eshoulder_pan_joint
+- ur5eshoulder_lift_joint
+- ur5eelbow_joint
+- ur5ewrist_1_joint
+- ur5ewrist_2_joint
+- ur5ewrist_3_joint
+- robotiq_85_left_knuckle_joint
+- robotiq_85_right_knuckle_joint
+- robotiq_85_left_inner_knuckle_joint
+- robotiq_85_right_inner_knuckle_joint
+- robotiq_85_left_finger_tip_joint
+- robotiq_85_right_finger_tip_joint
+position:
+- 0.07599950581789017
+- -1.0476776361465454
+- -0.06626754254102707
+- -2.5765035152435303
+- -1.1570032835006714
+- 1.2144100666046143
+- 1.5294708013534546
+- 1.5708041191101074
+- -1.9529091119766235
+- 0.8000122904777527
+- -0.8000016808509827
+- 0.8000097274780273
+- -0.8000093102455139
+- -0.800033688545227
+- 0.8000344038009644
+velocity:
+- 0.004003792069852352
+- -0.06357038766145706
+- 0.0005702408961951733
+- -0.029080457985401154
+- 0.017618082463741302
+- -0.025436967611312866
+- 0.007688739337027073
+- -0.00012370529293548316
+- 0.004494460299611092
+- -1.525572088212357e-06
+- -3.0123128453851677e-06
+- -2.1433197616715916e-06
+- 1.1784783282564604e-07
+- -4.2451563331269426e-07
+- -2.0758291157108033e-06
+effort:
+- 0.03807293251156807
+- -0.11822953820228577
+- -0.05856064334511757
+- 1.4328203201293945
+- -38.2458381652832
+- -17.7801570892334
+- 2.6138088703155518
+- 0.014039459638297558
+- -0.08478480577468872
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+---
+
+### topic rates
+average rate: 24.517
+	min: 0.001s max: 0.088s std dev: 0.01575s window: 26
+average rate: 24.530
+	min: 0.001s max: 0.088s std dev: 0.01478s window: 51
+average rate: 24.678
+	min: 0.001s max: 0.088s std dev: 0.01449s window: 76
+average rate: 24.519
+	min: 0.001s max: 0.088s std dev: 0.01477s window: 101
+average rate: 24.417
+	min: 0.001s max: 0.091s std dev: 0.01506s window: 125
+average rate: 24.429
+	min: 0.001s max: 0.091s std dev: 0.01535s window: 150
+average rate: 24.514
+	min: 0.001s max: 0.091s std dev: 0.01512s window: 176
+average rate: 24.529
+	min: 0.012s max: 0.086s std dev: 0.01289s window: 26
+average rate: 24.286
+	min: 0.010s max: 0.088s std dev: 0.01285s window: 51
+average rate: 24.193
+	min: 0.009s max: 0.088s std dev: 0.01292s window: 75
+average rate: 24.145
+	min: 0.009s max: 0.090s std dev: 0.01376s window: 99
+average rate: 24.025
+	min: 0.009s max: 0.093s std dev: 0.01424s window: 123
+average rate: 24.106
+	min: 0.008s max: 0.093s std dev: 0.01432s window: 148
+average rate: 24.089
+	min: 0.004s max: 0.095s std dev: 0.01502s window: 172

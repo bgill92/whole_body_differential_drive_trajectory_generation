@@ -1,0 +1,27 @@
+diff --git a/gs_ros/gs_ros/gs_ros_utils.py b/gs_ros/gs_ros/gs_ros_utils.py
+index da5db80..4798421 100644
+--- a/gs_ros/gs_ros/gs_ros_utils.py
++++ b/gs_ros/gs_ros/gs_ros_utils.py
+@@ -140,7 +140,7 @@ def gs_quat_to_ros_quat(input_quat):
+ def make_gs_scene(scene_config):
+     """Initialize a Genesis Scene object using parameters from a configuration dictionary."""
+     sim_config = scene_config["sim"]
+-    scene = gs.Scene(
++    scene_kwargs = dict(
+         sim_options=gs.options.SimOptions(
+             dt=sim_config.get("dt", 1e-2),
+             substeps=sim_config.get("substeps", 1),
+@@ -172,6 +172,13 @@ def make_gs_scene(scene_config):
+         renderer=make_renderer_options(scene_config.get("renderer_config", None)),
+         show_viewer=scene_config.get("show_Viewer", None),
+     )
++    # wbdd-genesis-ros compat shim: Genesis releases disagree on which option
++    # kwargs Scene accepts (e.g. avatar_options); drop any the installed
++    # release does not know instead of failing the whole scene build.
++    import inspect
++
++    scene_params = set(inspect.signature(gs.Scene.__init__).parameters)
++    scene = gs.Scene(**{k: v for k, v in scene_kwargs.items() if k in scene_params})
+     return scene
+ 
+ 
