@@ -114,3 +114,18 @@ convenient — it is unresolved which one is correct.
 non-commutative: `A * B ≠ B * A` in general. A transpose on the wrong side of
 a product (`(AB)ᵀ = BᵀAᵀ`, not `AᵀBᵀ`) causes silent type mismatches or runtime
 panics when dimensions don't align.
+
+## CI
+
+GitHub Actions runs [.github/workflows/ci.yml](.github/workflows/ci.yml) on
+pushes to `main` and all pull requests: `cargo build`, `cargo test`,
+`cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings`. The
+fmt and clippy jobs are gated hard (`-D warnings`), so keep the tree
+formatted and warning-free or CI fails.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
