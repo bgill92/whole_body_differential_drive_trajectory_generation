@@ -37,6 +37,10 @@ solver settings.
 
 ## How It Works
 
+For the full math — the QP/SQP formulation, every cost and constraint term,
+and the nonholonomic constraint derivation — see
+[docs/solver-theory.md](docs/solver-theory.md).
+
 The pipeline has three stages:
 
 1. **Path interpolation** — Waypoints from `assets/config.yaml` are densified
@@ -161,6 +165,7 @@ assets/
                     # (x, y, yaw) joint stack connecting world to base
   meshes/           # visual + collision meshes
 docs/
+  solver-theory.md               # the math: QP, SQP, nonholonomic constraint
   qp-sqp-solver-crates.md        # solver crate survey
   rust-best-practices.md         # Rust conventions for this repo
   superpowers/specs/             # design docs (corner rounding, SQP)
