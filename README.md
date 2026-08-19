@@ -99,6 +99,40 @@ end-effector path with goal axes, and the solved whole-body trajectory played
 back over time. The program blocks on exit until all data (including ~50 MiB
 of URDF meshes) reaches the viewer.
 
+## Genesis Simulation Demo
+
+![Solved whole-body trajectory executed in the Genesis simulator](assets/genesis_demo.gif)
+
+The same solved trajectory executed by the robot in
+[Genesis](https://github.com/Genesis-Embodied-AI/Genesis): `scripts/genesis_sim.py`
+runs the Rust pipeline with `WBDD_RRD_PATH` set (the same save hook
+`render_demo.py` uses), reads the animated joint transforms back out of the
+Rerun recording, and plays them through the diff-drive base + UR5e arm loaded
+in Genesis. Playback is kinematic — the base and arm are driven along the
+solved knots; there is no dynamics or controller tracking (a follow-up adds
+ROS control).
+
+Genesis is a heavy pip dependency and is intentionally not part of CI. Install
+it in a virtualenv (the `rerun-sdk` version must match the crate's `rerun`
+version in `Cargo.toml`; a CPU PyTorch wheel is enough):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install genesis-world "rerun-sdk==0.34.1"
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# headless: solves, simulates, and writes assets/genesis_demo.gif
+.venv/bin/python scripts/genesis_sim.py
+
+# interactive viewer instead of the offscreen capture
+.venv/bin/python scripts/genesis_sim.py --viewer
+```
+
+Offscreen capture needs a Vulkan-capable GPU; without one, run with
+`--viewer` on a machine with a display. The script patches a temporary copy of
+the URDF (Genesis requires joint limits on the virtual planar base joints,
+which carry none) and leaves `assets/rox_diff_ur5e.urdf` untouched.
+
 ## Configuration
 
 Everything is driven by a YAML config (see `assets/config.yaml` for the
@@ -171,6 +205,8 @@ docs/
   superpowers/specs/             # design docs (corner rounding, SQP)
 scripts/
   render_demo.py                 # regenerates assets/demo.gif headlessly
+  genesis_sim.py                 # plays the trajectory in Genesis, regenerates
+                                 # assets/genesis_demo.gif headlessly
 ```
 
 The mobile base is modeled with three planar joints
