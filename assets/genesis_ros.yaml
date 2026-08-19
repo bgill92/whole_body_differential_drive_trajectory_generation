@@ -1,0 +1,127 @@
+# Scene config for the genesis_ros bridge (scripts/genesis_ros_sim.py).
+# Follows the parent_config.yaml schema of genesis_ros
+# (https://github.com/vybhav-ibr/genesis_ros); see configs/parent_config.yaml
+# there for the full option space.
+#
+# robots.wbdd.morph.path is rewritten at runtime to the patched copy of
+# assets/rox_diff_ur5e.urdf (Genesis requires joint limits on the virtual
+# planar base joints), so the value below is only a placeholder.
+
+scene:
+  n_envs: 1
+  sim:
+    dt: 0.02
+    substeps: 1
+
+  show_Viewer: false
+
+  profiling_options:
+    show_FPS: false
+
+  # viewer_config and rigid_config are intentionally absent: gs_ros passes
+  # some of their options unconditionally (ViewerOptions.enable_interaction,
+  # RigidOptions.hibernation_thresh_acc) that the pinned Genesis release does
+  # not accept, and the Genesis defaults are what this scene wants anyway.
+
+  vis_config:
+    show_cameras: false
+    shadow: false
+    plane_reflection: false
+    lights:
+      - type: directional
+        dir: [-1, -1, -1]
+        color: [1.0, 1.0, 1.0]
+        intensity: 5.0
+
+world:
+  name: plane
+  world_type: plane
+
+objects:
+
+robots:
+  wbdd:
+    visualize_contact: false
+    namespace: "wbdd"
+    control:
+      # genesis_ros reads the control-topic namespace from the control block
+      # (defaulting to "robot"), not from the robot-level namespace above.
+      namespace: "wbdd"
+      joint_commands_topic: joint_commands
+      joint_commands_topic_frequency: 50
+      joint_states_topic: joint_states
+      joint_states_topic_frequency: 50
+      joint_control_topic: joint_control
+      joint_control_topic_frequency: 50
+      # The solved trajectory is executed as base joint velocities + arm
+      # joint positions. genesis_ros dispatches each joint by its `command`
+      # type and consumes command arrays in alphabetical joint_properties
+      # order; the publisher packs messages the same way.
+      joint_properties:
+        world_base_link_planar_prismatic_x:
+          kp: 500
+          kv: 500
+          command: velocity
+        world_base_link_planar_prismatic_y:
+          kp: 500
+          kv: 500
+          command: velocity
+        world_base_link_planar_yaw:
+          kp: 100
+          kv: 100
+          command: velocity
+        ur5eshoulder_pan_joint:
+          kp: 3000
+          kv: 300
+          command: position
+        ur5eshoulder_lift_joint:
+          kp: 3000
+          kv: 300
+          command: position
+        ur5eelbow_joint:
+          kp: 3000
+          kv: 300
+          command: position
+        ur5ewrist_1_joint:
+          kp: 1000
+          kv: 100
+          command: position
+        ur5ewrist_2_joint:
+          kp: 1000
+          kv: 100
+          command: position
+        ur5ewrist_3_joint:
+          kp: 1000
+          kv: 100
+          command: position
+
+    morph:
+      path: assets/rox_diff_ur5e.urdf
+      pos: [0.0, 0.0, 0.0]
+      euler: [0.0, 0.0, 0.0]
+      quat: null
+      visualization: true
+      collision: true
+      requires_jac_and_IK: false
+      scale: 1.0
+      convexify: null
+      recompute_inertia: false
+      fixed: false
+      prioritize_urdf_material: false
+      merge_fixed_links: false
+      links_to_keep: []
+
+    material:
+      type: rigid
+      rho: 200.0
+      friction: null
+      needs_coup: true
+      coup_friction: 0.1
+      coup_softness: 0.002
+      coup_restitution: 0.0
+      sdf_cell_size: 0.005
+      sdf_min_res: 32
+      sdf_max_res: 128
+      gravity_compensation: 0
+
+    sensors: []

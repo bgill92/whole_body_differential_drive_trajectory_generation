@@ -123,6 +123,14 @@ pushes to `main` and all pull requests: `cargo build`, `cargo test`,
 fmt and clippy jobs are gated hard (`-D warnings`), so keep the tree
 formatted and warning-free or CI fails.
 
+## Genesis / ROS Demos
+
+The Genesis playback demo and the genesis_ros control demo are Python
+scripts outside CI (Genesis is a heavy pip dependency). genesis_ros is
+third-party and only works against a pinned commit + Genesis release with
+`scripts/genesis_ros-compat.patch`; the validated stack and usage live in the
+README's Genesis sections.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
